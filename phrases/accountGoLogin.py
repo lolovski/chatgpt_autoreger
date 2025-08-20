@@ -1,0 +1,10 @@
+go_login_menu_text = 'Меню GoLogin. Выберите действие:'
+create_go_login_text = 'Выберите способ создания профиля:'
+token_create_go_login_text = 'Введите токен профиля:'
+create_go_login_success_text = 'Аккаунт успешно создан!\n'
+go_login_account_text = lambda account: (f'Аккаунт: {account.id}\n'
+                                         f'Почта: {account.email_address}\n'
+                                         f'Дата создания: {account.registration_date.strftime("%d.%m.%Y")}\n\n'
+                                         f'Токен: {account.api_token}\n'
+                                         f'Выберите действие:')
+wait_create_go_login_text = 'Создание профиля...'

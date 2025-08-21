@@ -1,52 +1,71 @@
 import asyncio
-from time import sleep
-
+import logging
 from seleniumbase import SB
-import random
-import string
-import time
-# from email_api import EmailApi
 from service.email_api import TempMailClient
+from service.sb_utils import *
+logger = logging.getLogger(__name__)
 
 
-async def create_account_go_login():
+class GoLoginRegistrationError(Exception):
+    """Ошибка при создании GoLogin аккаунта"""
+    pass
+
+async def create_account_go_login(process_name: str = "gologin-create"):
+    """
+        Создаёт аккаунт GoLogin через обычный Chrome (не через GoLoginProfile).
+        Использует TempMail для почты и возвращает (email, token).
+        """
     email_client = TempMailClient()
-    with SB(uc=True, incognito=True, locale="en", test=True) as sb:
-        page_url = "https://app.gologin.com/sign_up"
-        email_address = await email_client.create_account()
+    try:
+        # 1. Создаём временную почту
+        email = await email_client.create_account()
+        password = email_client.password
+        logger.info("[%s] Создан ящик %s", process_name, email)
+        # 2. В браузере проходим регистрацию GoLogin
+        with SB(browser="chrome", uc=True, headed=False) as sb:
+            def sync_register():
+                    sb.uc_open("https://app.gologin.com/sign_up")
+                    sb.type('input[placeholder="Email address"]', email)
+                    sb.type('input[placeholder="Password"]', password)
+                    sb.type('input[placeholder="Confirm password"]', password)
+                    sb.uc_click('button[type="submit"]')
+                    sb.wait_for_ready_state_complete()
 
-        sb.uc_open_with_reconnect(page_url)
+                    # Проверка успешной регистрации
+                    if not wait_for_text_safe(text="Let’s customize GoLogin for your needs", timeout=25, sb=sb):
+                        raise GoLoginRegistrationError("Не отобразился экран приветствия после регистрации")
 
-        sb.type('input[placeholder="Email address"]', email_address)
-        sb.type('input[placeholder="Password"]', email_address)
-        sb.type('input[placeholder="Confirm password"]', email_address)
-        sb.wait_for_element('button[type="submit"]')
-        sb.uc_click('button[type="submit"]')
+                    # Переходим к странице токенов
+                    sb.uc_open("https://app.gologin.com/personalArea/TokenApi")
 
-        sb.uc_gui_click_captcha()
+                    # Создаём новый токен
+                    if wait_for_element_safe(selector='span:contains("New Token")', timeout=15, sb=sb):
+                        sb.uc_click('span:contains("New Token")')
+                        if wait_for_element_safe(selector='span:contains("Confirm")', timeout=10, sb=sb):
+                            sb.uc_click('span:contains("Confirm")')
 
-        sb.wait_for_text_not_visible("I already", timeout=15)
+            await asyncio.to_thread(sync_register)
 
-        sb.assert_text("Let’s customize GoLogin for your needs", "body")
+            # --- асинхронная часть: ждём подтверждение на почте
+            confirm_link = await email_client.wait_confirm_link()
+            if not confirm_link:
+                raise RuntimeError("Не пришло письмо подтверждения")
 
-        sb.click('span:contains("No, this is my first time")')
-        sb.click('span:contains("Create new accounts")')
+            # --- кликаем по ссылке подтверждения в отдельном браузере
+            def sync_confirm():
+                sb.uc_open(confirm_link)
+                sb.uc_open('https://app.gologin.com/personalArea/TokenApi')
+                sb.click('span:contains("New Token")')
+                sb.wait_for_element_present('span:contains("Reveal token")', timeout=20)
+                sb.js_click('span:contains("Reveal token")')
+                sb.wait_for_element('div.css-8ojdky-InputToken')
+                api_token = sb.get_text('div.css-8ojdky-InputToken')
 
-        sb.click('span:contains("No, I’ve never used proxies")')
-        sb.click('span:contains("Outreach & Lead Generation")')
-        sb.uc_open('https://app.gologin.com/personalArea/TokenApi')
-        sb.click('span:contains("New Token")')
-        sb.click('span:contains("Confirm")')
-        confirm_link = await email_client.wait_confirm_link()
-        sb.uc_open(confirm_link)
-        sb.uc_open('https://app.gologin.com/personalArea/TokenApi')
-        sb.click('span:contains("New Token")')
+                return api_token
 
-        sb.wait_for_element_present('span:contains("Reveal token")', timeout=20)
+            token = await asyncio.to_thread(sync_confirm)
+        return email, token
 
-        sb.js_click('span:contains("Reveal token")')
-        sb.wait_for_element('div.css-8ojdky-InputToken')
-        api_token = sb.get_text('div.css-8ojdky-InputToken')
+    finally:
         await email_client.close()
-        return email_address, api_token
 

@@ -29,13 +29,13 @@ def gpt_menu_keyboard(accounts: List[AccountGPT]):
 def choice_create_gpt_account_keyboard():
     buttons = [
         [
-            InlineKeyboardButton(text='Автоматическое создание', callback_data=AccountGPTCallback(action='auto_create').pack())
+            InlineKeyboardButton(text='➕ Создать через SB', callback_data=AccountGPTCallback(action='auto_create').pack())
         ],
         [
-            InlineKeyboardButton(text='Ручное создание', callback_data=AccountGPTCallback(action='manual_create').pack())
+            InlineKeyboardButton(text='✍️ Ввести вручную', callback_data=AccountGPTCallback(action='manual_create').pack())
         ],
         [
-            InlineKeyboardButton(text='Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
+            InlineKeyboardButton(text='⬅️ Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -43,7 +43,7 @@ def choice_create_gpt_account_keyboard():
 def manual_create_gpt_account_keyboard():
     buttons = [
         [
-            InlineKeyboardButton(text='Отмена', callback_data=AccountGPTCallback(action='create').pack())
+            InlineKeyboardButton(text='⬅️ Отмена', callback_data=AccountGPTCallback(action='create').pack())
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -55,7 +55,7 @@ def gpt_account_keyboard(account: AccountGPT):
             InlineKeyboardButton(text='Запустить', callback_data=AccountGPTCallback(action='launch', params=account.id).pack())
         ],
         [
-            InlineKeyboardButton(text='Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
+            InlineKeyboardButton(text='⬅️ Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -64,7 +64,7 @@ def gpt_account_keyboard(account: AccountGPT):
 def choice_go_login_account_keyboard(accounts: List[AccountGoLogin], action):
     buttons = [
         [
-            InlineKeyboardButton(text='Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
+            InlineKeyboardButton(text='⬅️ Назад', callback_data=NavigationCallback(menu='chatGPT').pack())
         ]
     ]
     for account in accounts:

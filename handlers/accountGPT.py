@@ -92,24 +92,25 @@ async def auto_gologin_gpt_account_handler(callback: CallbackQuery, callback_dat
     await callback.message.edit_text(wait_manual_create_gpt_account_text)
     go_login_id = int(callback_data.params)
     account_go_login = await AccountGoLogin.get(id=go_login_id)
-    try:
-        email, password, name, profile_id = await register_chatgpt(account_go_login.api_token)
+    # try:
+    email, password, name, profile_id = await register_chatgpt(account_go_login.api_token)
 
-        db_account = await AccountGPT(
-            email_address=email,
-            id=profile_id,
-            password=password,
-            name=name,
-            accountGoLogin_id=go_login_id
+    db_account = await AccountGPT(
+        email_address=email,
+        id=profile_id,
+        password=password,
+        name=name,
+        accountGoLogin_id=go_login_id
 
-        ).create()
-        await state.clear()
-        await callback.message.edit_text(text=create_gpt_account_success_text + gpt_account_text(db_account),
-                                         reply_markup=gpt_account_keyboard(db_account))
+    ).create()
+    await state.clear()
+    await callback.message.edit_text(text=create_gpt_account_success_text + gpt_account_text(db_account),
+                                     reply_markup=gpt_account_keyboard(db_account))
 
-    except Exception as e:
-        await callback.message.edit_text(text=create_gpt_account_error_text,
-                                         reply_markup=main_menu_keyboard())
+    # except Exception as e:
+    #     print(e)
+    #     await callback.message.edit_text(text=create_gpt_account_error_text,
+    #                                      reply_markup=main_menu_keyboard())
 
 
 @accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'launch'))

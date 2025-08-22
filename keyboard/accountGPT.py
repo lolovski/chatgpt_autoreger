@@ -20,7 +20,7 @@ def gpt_menu_keyboard(accounts: List[AccountGPT]):
         )
     buttons.append(
         [
-            InlineKeyboardButton(text='Назад', callback_data=NavigationCallback(menu='main').pack())
+            InlineKeyboardButton(text='⬅️ Назад', callback_data=NavigationCallback(menu='main').pack())
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=buttons)

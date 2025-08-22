@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 async def login_chatgpt_account(token: str, email_address: str, password: str, process_name: str = "gpt-register"):
     """Автовход в ChatGPT в GoLogin-профиле"""
     async def _job():
-        profile = GoLoginProfile(token)
+        profile = GoLoginProfile(api_token=token)
         try:
             profile.create_profile()
             profile.start_profile()

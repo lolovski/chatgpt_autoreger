@@ -2,7 +2,8 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional, Dict
+from contextlib import _GeneratorContextManager
+from typing import Optional, Dict, ContextManager, ClassVar
 from gologin import GoLogin
 import requests
 from seleniumbase import SB
@@ -31,17 +32,17 @@ class GoLoginProfile:
         self.create_payload: Optional[Dict] = None
         self.gl = GoLogin({"token": self.api_token})
         self.base_url = "https://api.gologin.com"
-        self.headers={
-            "Authorization": f"Bearer {self.api_token}",
-            "User-Agent": "gologin-api",
-            "Content-Type": "application/json",
-        },
 
     # ================= API =================
 
     def _request(self, method: str, endpoint: str, **kwargs):
         url = f"{self.base_url}{endpoint}"
-        resp = requests.request(method, url, headers=self.headers, **kwargs)
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "User-Agent": "gologin-api",
+            "Content-Type": "application/json",
+        },
+        resp = requests.request(method, url, headers=headers[0], **kwargs)
         if resp.status_code >= 400:
             raise GoLoginProfileError(f"GoLogin API error {resp.status_code}: {resp.text}")
         return resp.json() if resp.text else {}
@@ -58,6 +59,12 @@ class GoLoginProfile:
             endpoint=r'/users-proxies/mobile-proxy',
             json=payload
         )
+
+    def read_bundle(self, cookies_path=None):
+        out_name = cookies_path if cookies_path is not None else f"cookies/{self.profile_id}.json"
+        with open(out_name, "r") as f:
+            self.bundle = json.load(f)
+
     def setup_bundle(self):
         base_payload = dict(self.bundle.get("profile_payload", {}))
         # Гарантируем обновление имени (чтобы не конфликтовало)
@@ -84,22 +91,20 @@ class GoLoginProfile:
 
         self.create_payload = base_payload
 
-    def create_profile(self, name: str = f"ChatGPTprofile-{int(time.time())}") -> str:
+    def create_profile(self, name: str = f"ChatGPTprofile-{int(time.time())}", valid: bool = False) -> str:
         """Создаёт новый профиль GoLogin и возвращает его ID"""
-        if self.profile_id:
+        if valid and self.profile_id is not None:
+            # self.check_valid()
             self.gl.setProfileId(profile_id=self.profile_id)
             logger.info("[%s] Используется существующий профиль GoLogin: %s", self.process_name, self.profile_id)
             return self.profile_id
-        if self.bundle:
-            self.setup_bundle()
-            profile = self.gl.create(self.create_payload)
-            self.profile_id = profile
-        else:
-            profile = self.gl.createProfileRandomFingerprint({"os": "win", "name": name})
-            self.profile_id = profile.get("id")
 
+        if not valid and self.profile_id is not None:
+            self.read_bundle(cookies_path=f'cookies/{self.profile_id}.json')
+
+        profile = self.gl.createProfileRandomFingerprint({"os": "win", "name": name})
+        self.profile_id = profile.get("id")
         self.try_link_proxy()
-
         if not self.profile_id:
             raise GoLoginProfileError("Не удалось создать профиль GoLogin (нет id)")
         self.gl.setProfileId(profile_id=self.profile_id)
@@ -127,18 +132,19 @@ class GoLoginProfile:
         logger.info("[%s] Профиль %s запущен, wsUrl=%s", self.process_name, self.profile_id, ws_url)
         return ws_url
 
-    def stop_profile(self, sb=None, e=None):
+    def stop_profile(self, sb=None, e=None, cookies_path=None):
         """Останавливает профиль GoLogin"""
-        if e:
-            self.gl.stop()
-            logger.info("[%s] Профиль %s остановлен", self.process_name, self.profile_id)
+        if e is not None:
+            if hasattr(self, "gl") and self.gl and getattr(self.gl, "driver", None):
+                self.gl.stop()
+            return logger.info("[%s] Профиль %s остановлен", self.process_name, self.profile_id)
         if not self.profile_id:
             return
         try:
             self._collect_portable_state(sb)
-            self.save_bundle()
-            self.gl.stop()
-            logger.info("[%s] Профиль %s остановлен", self.process_name, self.profile_id)
+            self.save_bundle(cookies_path)
+
+            logger.info("[%s] Профиль %s завершил работу", self.process_name, self.profile_id)
         except Exception as e:
             logger.error("[%s] Ошибка при остановке профиля %s: %s", self.process_name, self.profile_id, e)
     # ================= SeleniumBase =================
@@ -156,8 +162,13 @@ class GoLoginProfile:
             uc=True,
             locale='en',
             headed=not headless,
-            remote_url=self.driver_url,
+            chromium_arg=[
+                f"--remote-debugging-address={host}",
+                f"--remote-debugging-port={port}",
+            ],
         )
+
+
         return sb
 
     # ================= High-level helpers =================
@@ -208,9 +219,10 @@ class GoLoginProfile:
             "profile_payload": profile_payload,   # fingerprint/navigator/etc.
         }
         self.bundle = bundle
-
-    def save_bundle(self):
-        out_name = f'cookies/{self.profile_id}'
+        sb.uc_open('https://chatgpt.com/')
+    def save_bundle(self, cookies_path=None):
+        out_name = cookies_path if cookies_path is not None else f"cookies/{self.profile_id}.json"
+        # Сохраним в файл
         with open(out_name, "w", encoding="utf-8") as f:
             json.dump(self.bundle, f, ensure_ascii=False, indent=2)
         logger.info(f"✅ Сохранён переносимый бандл: {out_name}")

@@ -94,7 +94,7 @@ class GoLoginProfile:
     def create_profile(self, name: str = f"ChatGPTprofile-{int(time.time())}", valid: bool = False) -> str:
         """Создаёт новый профиль GoLogin и возвращает его ID"""
         if valid and self.profile_id is not None:
-            # self.check_valid()
+
             self.gl.setProfileId(profile_id=self.profile_id)
             logger.info("[%s] Используется существующий профиль GoLogin: %s", self.process_name, self.profile_id)
             return self.profile_id

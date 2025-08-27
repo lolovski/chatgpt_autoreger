@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import Base, session
-from sqlalchemy import Column, String, ForeignKey, select, Integer
+from sqlalchemy import Column, String, ForeignKey, select, Integer, Boolean
 from sqlalchemy.orm import relationship, Mapped, mapped_column, Session
 
 
@@ -17,6 +17,7 @@ class AccountGPT(Base):
         nullable=True
     )
     accountGoLogin = relationship('AccountGoLogin', back_populates="accountsGPT", lazy='selectin', foreign_keys=[accountGoLogin_id])
+    auto_create = Column(Boolean, default=True)
 
     def __init__(self, name: str, email_address: str, password: str, id: str, accountGoLogin_id: int = None):
         self.id = id

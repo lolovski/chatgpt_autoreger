@@ -55,21 +55,26 @@ async def manual_create_gpt_account_email_handler(callback: CallbackQuery, callb
     data = await state.get_data()
     try:
         email_address, password, name = data.get('account_data').split(":")
-        account_id = await login_chatgpt_account(
+        result = await login_chatgpt_account(
             token=account_go_login.api_token,
             email_address=email_address,
             password=password,
         )
+        if isinstance(result, str):
 
-        db_account = await AccountGPT(
-            email_address=email_address,
-            password=password,
-            name=name,
-            accountGoLogin_id=account_go_login.id,
-            id=account_id
-        ).create()
-        await state.clear()
-        await callback.message.edit_text(text=create_gpt_account_success_text+gpt_account_text(db_account), reply_markup=gpt_account_keyboard(account=db_account))
+            db_account = await AccountGPT(
+                email_address=email_address,
+                password=password,
+                name=name,
+                accountGoLogin_id=account_go_login.id,
+                id=result
+            ).create()
+            await state.clear()
+            return await callback.message.edit_text(text=create_gpt_account_success_text+gpt_account_text(db_account), reply_markup=gpt_account_keyboard(account=db_account))
+        await state.set_state(AccountGPTForm.verification_code)
+        await state.update_data(account_data=f'{email_address}:{password}:{name}:{account_go_login.id}')
+        await state.update_data(profile_data=result.get('profile'))
+
     except Exception as e:
     
         await callback.message.edit_text(text=create_gpt_account_error_text,
@@ -116,30 +121,71 @@ async def launch_account_gpt_handler(callback: CallbackQuery, callback_data: Acc
     await callback.message.edit_text(text=wait_manual_create_gpt_account_text)
     db_account = await AccountGPT.get(id=callback_data.params)
     account_go_login = await AccountGoLogin.get(id=db_account.accountGoLogin_id)
-    if account_go_login is None:
+    if account_go_login is None or not account_go_login.valid:
         token = (await AccountGoLogin.get_first_valid()).api_token
-        await restart_chatgpt_account(
-                token=token,
-                account=db_account,
-                valid=False
-            )
-        return await callback.message.edit_text(launch_account_gpt_text + gpt_account_text(account=db_account),
-                                         reply_markup=gpt_account_keyboard(account=db_account))
-    if not account_go_login.valid:
-        token = (await AccountGoLogin.get_first_valid()).api_token
-        await restart_chatgpt_account(
-            token=token,
-            account=db_account,
-            valid=False
+        result = await restart_chatgpt_account(token, db_account, valid=False)
+    else:
+        # Если аккаунт валиден, перезапускаем с текущим токеном
+        result = await restart_chatgpt_account(account_go_login.api_token, db_account, valid=account_go_login.valid)
+
+        # Завершаем процесс с обновленным текстом и клавиатурой
+    if result is None:
+        return await callback.message.edit_text(
+            launch_account_gpt_text + gpt_account_text(account=db_account),
+            reply_markup=gpt_account_keyboard(account=db_account)
         )
-        return await callback.message.edit_text(launch_account_gpt_text + gpt_account_text(account=db_account),
-                                         reply_markup=gpt_account_keyboard(account=db_account))
-
-    await restart_chatgpt_account(
-        token=account_go_login.api_token,
-        account=db_account,
-        valid=account_go_login.valid
+    if result.get('email_client') is None:
+        await state.set_state(AccountGPTForm.verification_code)
+        await state.update_data(account_data=db_account.id)
+        await state.update_data(profile_data=result.get('profile'))
+        await callback.message.edit_text(code_input_text)
+    await code_chatgpt_account(
+        profile=result.get('profile'),
+        email_client=result.get('email_client'),
     )
-    await callback.message.edit_text(launch_account_gpt_text+gpt_account_text(account=db_account), reply_markup=gpt_account_keyboard(account=db_account))
 
 
+async def start_verification_timeout(state: FSMContext, message: Message, minutes: int = 5):
+    await asyncio.sleep(minutes * 60)
+    current_state = await state.get_state()
+    if current_state == AccountGPTForm.verification_code:
+        await state.clear()
+        await message.answer("⌛ Время ожидания кода истекло. Попробуйте снова.")
+
+
+@accountGPT_router.message(AccountGPTForm.verification_code)
+async def gpt_verification_code_handler(message: Message, state: FSMContext, bot: Bot):
+    code = message.text.strip()
+    data = await state.get_data()
+    attempts = data.get("attempts", 0)
+
+    try:
+        await code_chatgpt_account(
+            profile=data.get('profile_data'),
+            code=code
+        )
+    except Exception:
+        attempts += 1
+        if attempts >= 3:
+            await state.clear()
+            return await message.answer("❌ Код неверный 3 раза. Процесс отменён.")
+        await state.update_data(attempts=attempts)
+        return await message.answer(f"❌ Код неверный. Осталось попыток: {3 - attempts}")
+    if data.get('account_data').count(':') == 2:
+        email_address, password, name, go_login_id = data.get('account_data').split(":")
+
+        db_account = await AccountGPT(
+            email_address=email_address,
+            password=password,
+            name=name,
+            accountGoLogin_id=go_login_id,
+            id=data.get('profile_data').profile_id
+        ).create()
+        await state.clear()
+    else:
+        db_account = await AccountGPT.get(id=data.get('account_data'))
+        await state.clear()
+    await message.answer(
+        text="✅ Аккаунт подтверждён и запущен!\n" + gpt_account_text(db_account),
+        reply_markup=gpt_account_keyboard(account=db_account)
+    )

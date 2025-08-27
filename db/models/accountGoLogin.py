@@ -18,6 +18,7 @@ class AccountGoLogin(Base):
     registration_date = Column(DateTime, default=datetime.now(moscow_tz))
     valid = Column(Boolean, default=True)
     accountsGPT = relationship("AccountGPT", back_populates="accountGoLogin", )
+    auto_create = Column(Boolean, default=True)
 
     def __init__(self, email_address: str, api_token: str):
         self.email_address = email_address

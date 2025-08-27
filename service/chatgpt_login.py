@@ -31,10 +31,9 @@ async def login_chatgpt_account(token: str, email_address: str, password: str, p
                     sb.uc_click('button[type="submit"]')
 
                     if sb.is_element_visible('input[name="code"]'):
-                        code = input('Введите код')
-                        sb.type('input[name="code"]', code)
-                        sb.uc_click('button[type="submit"]')
-
+                        return {
+                            'profile': profile
+                        }
                     sb.wait_for_ready_state_complete()
                     profile.stop_profile(sb=sb)
 

@@ -15,3 +15,4 @@ create_gpt_account_error_text = 'Создать аккаунт не удалос
 chatgpt_error_format_text = "⚠️ Формат неверный, введите: email:пароль:имя_в_боте"
 launch_account_gpt_text = 'Аккаунт запущен! \n'
 error_launch_account_gpt_text = 'Ошибка запуска аккаунта, попробуйте позже\n'
+code_input_text = 'Введите код из письма:'

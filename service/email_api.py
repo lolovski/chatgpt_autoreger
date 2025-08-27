@@ -48,6 +48,11 @@ class TempMailClient:
                 raise RuntimeError(f"Не удалось получить токен: {data}")
             self.token = data["token"]
 
+    async def restart(self, email, password):
+        self.address = email
+        self.password = password
+        await self.login()
+
     async def _get_messages(self):
         headers = {"Authorization": f"Bearer {self.token}"}
         async with self.session.get(f"{self.BASE_URL}/messages", headers=headers) as resp:

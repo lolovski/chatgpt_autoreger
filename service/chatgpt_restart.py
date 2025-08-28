@@ -1,25 +1,29 @@
+# service/chatgpt_restart.py
+
 import asyncio
 import logging
-
-
 from db.models import AccountGPT
-from service import TempMailClient
 from service.gologin_profile import GoLoginProfile
 from service.sb_utils import wait_for_element_safe
 from service.process_manager import process_manager
+from service.exceptions import TwoFactorRequiredError  # ИЗМЕНЕНО: импорт исключения
 
 logger = logging.getLogger(__name__)
 
 
-async def restart_chatgpt_account(token: str, account: AccountGPT, process_name: str = "gpt-restart", valid: bool = False):
-
+# ИЗМЕНЕНО: Добавлен параметр 'code'
+async def restart_chatgpt_account(token: str, account: AccountGPT, code: str = None, process_name: str = "gpt-restart",
+                                  valid: bool = False):
     """Рестарт существующего ChatGPT профиля"""
-    def login(sb, profile, email_client):
 
-        sb.uc_open("https://chatgpt.com/auth/login")
-        if not wait_for_element_safe(sb, 'button[data-testid="login-button"]', 20):
-            raise RuntimeError("Не найдена кнопка login")
-        sb.uc_click('button[data-testid="login-button"]')
+    def login(sb):
+        if sb.get_current_url().startswith('https://auth.openai.com/'):
+            ...
+        else:
+            sb.uc_open("https://chatgpt.com/auth/login")
+            if not wait_for_element_safe(sb, 'button[data-testid="login-button"]', 20):
+                raise RuntimeError("Не найдена кнопка login")
+            sb.uc_click('button[data-testid="login-button"]')
         sb.type('input[name="email"]', account.email_address)
         sb.uc_click('button[type="submit"]')
 
@@ -28,100 +32,49 @@ async def restart_chatgpt_account(token: str, account: AccountGPT, process_name:
         sb.type('input[name="current-password"]', account.password)
         sb.uc_click('button[type="submit"]')
 
+        # ИЗМЕНЕНО: Блок обработки 2FA без input()
         if sb.is_element_visible('input[name="code"]'):
-            return {
-                "email_client": email_client,
-                "profile": profile
-            }
+            if code:
+                # Если код был предоставлен, вводим его
+                sb.type('input[name="code"]', code)
+                sb.uc_click('button[type="submit"]')
+            else:
+                # Если код требуется, но не был предоставлен, выбрасываем исключение
+                raise TwoFactorRequiredError("Требуется код двухфакторной аутентификации")
 
         sb.wait_for_ready_state_complete()
 
     async def _job():
-        email_client = None
-        if account.auto_create:
-            email_client = TempMailClient()
-            await email_client.restart(
-                email=account.email_address,
-                password=account.password
-            )
-        if valid:
-            profile = GoLoginProfile(
-                api_token=token,
-                profile_id=account.id,
-            )
-            try:
-                profile.create_profile(valid=valid)
-                profile.start_profile()
+        profile = GoLoginProfile(
+            api_token=token,
+            profile_id=account.id,
+        )
+        try:
+            profile.create_profile(valid=valid)
+            profile.start_profile()
 
-                def sync_job():
-                    with profile.open_sb() as sb:
+            def sync_job():
+                with profile.open_sb() as sb:
+                    if valid:
                         sb.uc_open("https://chatgpt.com/")
                         sb.wait_for_ready_state_complete()
                         url = sb.get_current_url()
-                        if url == 'https://auth.openai.com/log-in' or sb.is_element_visible('button[data-testid="login-button"]'):
-                            login(sb, profile, email_client)
-                        profile.stop_profile(cookies_path=account.cookies_path, sb=sb)
-                await asyncio.to_thread(sync_job)
+                        if url.startswith('https://auth.openai.com/') or sb.is_element_visible(
+                                'button[data-testid="login-button"]'):
+                            logger.warning(f"[GPT] Сессия для {account.id} невалидна, требуется повторный вход.")
+                            login(sb)
+                    else:
+                        login(sb)
 
-            except Exception as e:
-                logger.error(f"[GPT] Ошибка рестарта: {e}", exc_info=True)
-                profile.stop_profile(e=True)
-                raise
-            finally:
-                if email_client is not None:
-                    await email_client.close()
+                    profile.stop_profile(cookies_path=account.cookies_path, sb=sb)
 
+            await asyncio.to_thread(sync_job)
 
-        else:
-            profile = GoLoginProfile(
-                api_token=token,
-                profile_id=account.id,
-            )
-            try:
-                profile.create_profile(valid=valid)
-                profile.start_profile()
-
-                def sync_job():
-                    with profile.open_sb() as sb:
-                        login(sb, profile, email_client)
-                        profile.stop_profile(cookies_path=account.cookies_path, sb=sb)
-
-                await asyncio.to_thread(sync_job)
-
-            except Exception as e:
-                logger.error(f"[GPT] Ошибка входа: {e}", exc_info=True)
-                profile.stop_profile(e=True)
-                raise
-            finally:
-                if email_client is not None:
-                    await email_client.close()
-
-    process_manager.start(process_name, _job())
-    return await process_manager.result(process_name)
-
-
-async def code_chatgpt_account(profile, email_client=None, code: str = None,  process_name: str = "gpt-code",):
-    if email_client is None and code is None:
-        raise ValueError("Необходимо указать email_client или code")
-
-    async def _job():
-        if email_client is not None:
-            code = email_client.get_code()
-        try:
-            with profile.open_sb() as sb:
-
-                sb.wait_for_element('input[name="code"]', timeout=10)
-                sb.type('input[name="code"]', code)
-                sb.click('button[type="submit"]')
-                sb.wait_for_ready_state_complete()
-                profile.stop_profile(sb=sb)
         except Exception as e:
-            logger.error(f"[GPT] Ошибка входа: {e}", exc_info=True)
+            logger.error(f"[GPT] Ошибка рестарта/входа: {e}", exc_info=True)
             profile.stop_profile(e=True)
+            # Перебрасываем исключение, чтобы его мог поймать хендлер
             raise
-        finally:
-            if email_client is not None:
-                await email_client.close()
 
-    process_manager.start(process_name, _job())
-    return await process_manager.result(process_name)
+    # Вызываем напрямую для обработки исключений в хендлере
+    return await _job()

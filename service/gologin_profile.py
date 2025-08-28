@@ -2,20 +2,16 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import _GeneratorContextManager
 from typing import Optional, Dict, ContextManager, ClassVar
 from gologin import GoLogin
 import requests
 from seleniumbase import SB
 
+from service.exceptions import GoLoginProfileError
 from service.sb_utils import *
 
 logger = logging.getLogger(__name__)
 
-
-class GoLoginProfileError(Exception):
-    """Ошибка работы с профилем GoLogin"""
-    pass
 
 
 class GoLoginProfile:
@@ -23,8 +19,10 @@ class GoLoginProfile:
     Класс для управления профилем GoLogin и работы через SeleniumBase.
     """
 
-    def __init__(self, api_token: str, profile_id: Optional[str] = None, process_name: str = f"GoLoginProfile-{int(time.time())}", bundle: Optional[Dict] = None):
+    def __init__(self, api_token: str,
+                 profile_id: Optional[str] = None, process_name: str = f"GoLoginProfile-{int(time.time())}", bundle: Optional[Dict] = None, timeout: int = 30):
         self.api_token = api_token
+        self.timeout = timeout
         self.bundle = bundle
         self.profile_id = profile_id
         self.process_name = process_name

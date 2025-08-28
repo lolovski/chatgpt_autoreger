@@ -1,15 +1,21 @@
+# service/chatgpt_login.py
+
 import asyncio
 import logging
 from service.gologin_profile import GoLoginProfile
 from service.sb_utils import wait_for_element_safe
 from service.email_api import TempMailClient
 from service.process_manager import process_manager
+from service.exceptions import TwoFactorRequiredError  # ИЗМЕНЕНО: импорт исключения
 
 logger = logging.getLogger(__name__)
 
 
-async def login_chatgpt_account(token: str, email_address: str, password: str, process_name: str = "gpt-register"):
+# ИЗМЕНЕНО: Добавлен параметр 'code'
+async def login_chatgpt_account(token: str, email_address: str, password: str, code: str = None,
+                                process_name: str = "gpt-login"):
     """Автовход в ChatGPT в GoLogin-профиле"""
+
     async def _job():
         profile = GoLoginProfile(api_token=token)
         try:
@@ -30,12 +36,21 @@ async def login_chatgpt_account(token: str, email_address: str, password: str, p
                     sb.type('input[name="current-password"]', password)
                     sb.uc_click('button[type="submit"]')
 
+                    # ИЗМЕНЕНО: Блок обработки 2FA без input()
                     if sb.is_element_visible('input[name="code"]'):
-                        return {
-                            'profile': profile
-                        }
+                        if code:
+                            # Если код был предоставлен, вводим его
+                            sb.type('input[name="code"]', code)
+                            sb.uc_click('button[type="submit"]')
+                            profile.stop_profile(sb=sb)
+                        else:
+                            # Если код требуется, но не был предоставлен, выбрасываем исключение
+                            profile.stop_profile(e=True)
+
+                            raise TwoFactorRequiredError("Требуется код двухфакторной аутентификации")
+
                     sb.wait_for_ready_state_complete()
-                    profile.stop_profile(sb=sb)
+
 
             await asyncio.to_thread(sync_job)
             return profile.profile_id
@@ -43,7 +58,9 @@ async def login_chatgpt_account(token: str, email_address: str, password: str, p
         except Exception as e:
             logger.error(f"[GPT] Ошибка входа: {e}", exc_info=True)
             profile.stop_profile(e=True)
+            # Перебрасываем исключение, чтобы его мог поймать хендлер
             raise
 
-    process_manager.start(process_name, _job())
-    return await process_manager.result(process_name)
+    # Вместо process_manager, который скрывает исключения, вызываем напрямую
+    # Это позволит нам ловить TwoFactorRequiredError в хендлере
+    return await _job()

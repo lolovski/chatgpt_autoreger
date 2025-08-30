@@ -8,7 +8,6 @@ from selenium.webdriver import ActionChains
 from service.gologin_profile import GoLoginProfile
 from service.sb_utils import wait_for_element_safe
 from service.email_api import TempMailClient
-from service.process_manager import process_manager
 
 logger = logging.getLogger(__name__)
 

@@ -1,14 +1,13 @@
 import asyncio
 import json
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 
+from pyppeteer import connect
 from pyppeteer.browser import Browser
 from pyppeteer.page import Page
-from pyppeteer import connect
 
 from service.GoLoginAPIClient import GoLoginAPIClient, GoLoginAPIError
-
 
 logger = logging.getLogger(__name__)
 
@@ -16,28 +15,55 @@ logger = logging.getLogger(__name__)
 class GoLoginProfile:
     """
     Асинхронный менеджер для управления профилями GoLogin.
-    Использует pyppeteer для подключения к запущенному профилю.
+
+    Этот класс предоставляет асинхронный контекстный менеджер (__aenter__/__aexit__)
+    для автоматизации жизненного цикла профиля GoLogin: создание (при необходимости),
+    запуск, подключение через pyppeteer и последующая очистка (остановка и удаление).
+
+    Использует `GoLoginAPIClient` для всех взаимодействий с GoLogin API.
+
+    Атрибуты:
+        api_client (GoLoginAPIClient): Клиент для работы с GoLogin API.
+        profile_id (Optional[str]): ID существующего профиля GoLogin или None для создания временного.
+        persistent_profile (bool): Флаг, указывающий, является ли профиль постоянным.
+        browser (Optional[Browser]): Экземпляр браузера pyppeteer.
+        page (Optional[Page]): Экземпляр страницы pyppeteer.
     """
 
     def __init__(self, api_token: str, profile_id: Optional[str] = None):
+        """
+        Инициализирует менеджер профиля GoLogin.
+
+        Args:
+            api_token (str): Ваш API токен от GoLogin.
+            profile_id (Optional[str]): Если указан, менеджер будет работать
+                с этим существующим профилем. Если None, будет создан и
+                автоматически удален временный профиль.
+        """
         self.api_client = GoLoginAPIClient(api_token=api_token)
-        self.persistent_profile = bool(profile_id)
         self.profile_id: Optional[str] = profile_id
+        self.persistent_profile = bool(profile_id)
 
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
 
     async def __aenter__(self) -> Page:
+        """
+        Вход в асинхронный контекст: создает (если нужно), запускает профиль и подключается к нему.
+        """
         try:
             if not self.persistent_profile:
-                logger.info("Creating a quick profile...")
+                logger.info("Создание временного профиля GoLogin...")
                 profile_data = await self.api_client.create_quick_profile()
                 self.profile_id = profile_data.get("id")
                 if not self.profile_id:
-                    raise GoLoginAPIError(0, f"Failed to get id from quick profile: {profile_data}")
+                    raise GoLoginAPIError(0, f"Не удалось получить ID из созданного профиля: {profile_data}")
+                # Примечание: установка прокси для quick-профилей обычно не требуется,
+                # так как они создаются с уже настроенным гео.
                 await self.api_client.set_proxy(profile_id=self.profile_id)
 
-            logger.info(f"Starting profile: {self.profile_id}")
+            logger.info(f"Запуск профиля: {self.profile_id}")
+            # Метод start_profile из GoLoginAPIClient уже содержит логику ожидания и повторов
             ws_url = await self.api_client.start_profile(profile_id=self.profile_id)
 
             logger.info("Connecting via pyppeteer...")
@@ -45,97 +71,75 @@ class GoLoginProfile:
                 browserURL=f"http://{ws_url}",
                 defaultViewport=None
             )
-            self.page = await self.browser.newPage()
+            pages = await self.browser.pages()
+            self.page = pages[0] if pages else await self.browser.newPage()
             return self.page
 
         except Exception as e:
-            logger.error(f"Failed to setup GoLogin profile: {e}", exc_info=True)
+            logger.error(f"Ошибка при настройке профиля GoLogin ({self.profile_id}): {e}", exc_info=True)
+            # Гарантируем очистку ресурсов при любой ошибке на входе
             await self.__aexit__(type(e), e, e.__traceback__)
             raise
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        logger.info(f"Cleaning up resources for profile: {self.profile_id}")
+        """
+        ИЗМЕНЕНО: Выход из контекста теперь не закрывает браузер, а отсоединяется от него.
+        Профиль остается работать в приложении GoLogin.
+        """
+        logger.info(f"Отсоединение от профиля: {self.profile_id}, оставляя его открытым.")
+
         if self.browser:
-            await self.browser.close()
-            logger.info("pyppeteer browser instance closed.")
+            await self.browser.disconnect()
+            logger.info("Соединение pyppeteer разорвано. Браузер остается открытым.")
 
-        if self.profile_id and not self.persistent_profile:
-            logger.info(f"Deleting quick profile: {self.profile_id}")
-            await self.api_client.delete_profile(profile_id=self.profile_id)
+        # ИЗМЕНЕНО: ПОЛНОСТЬЮ УДАЛЕНА ЛОГИКА УДАЛЕНИЯ ПРОФИЛЯ.
+        # Даже временные профили теперь не удаляются, так как по условию задачи
+        # они должны остаться доступными для ручной работы.
 
+        # Закрываем HTTP-клиент к API, он больше не нужен.
         await self.api_client.close()
-        logger.info("Cleanup complete.")
+        logger.info(f"Отсоединение от профиля {self.profile_id} завершено.")
 
     async def save_cookies(self, file_path: str, domains: List[str]):
+        """
+        Сохраняет cookie для указанных доменов в JSON-файл.
+
+        Args:
+            file_path (str): Путь к файлу для сохранения cookie.
+            domains (List[str]): Список доменов, cookie которых нужно сохранить.
+        """
         if not self.page:
-            raise RuntimeError("Browser page is not running.")
+            raise RuntimeError("Страница браузера не активна. Вызовите save_cookies внутри блока 'async with'.")
 
         all_cookies = await self.page.cookies()
-        domain_cookies = [c for c in all_cookies if any(d in c["domain"] for d in domains)]
+        # Фильтруем cookie, чтобы сохранить только те, что относятся к нужным доменам
+        domain_cookies = [c for c in all_cookies if any(d in c.get("domain", "") for d in domains)]
 
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(domain_cookies, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saved {len(domain_cookies)} cookies to {file_path}")
+        logger.info(f"Сохранено {len(domain_cookies)} cookie для доменов {domains} в файл {file_path}")
 
     async def load_cookies(self, file_path: str):
+        """
+        Загружает cookie из JSON-файла в текущую сессию браузера.
+
+        Args:
+            file_path (str): Путь к файлу с cookie.
+        """
         if not self.page:
-            raise RuntimeError("Browser page is not running.")
+            raise RuntimeError("Страница браузера не активна. Вызовите load_cookies внутри блока 'async with'.")
 
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 cookies = json.load(f)
 
+            # Удаляем старые cookie перед загрузкой новых, чтобы избежать конфликтов
+            await self.page.deleteCookie(*await self.page.cookies())
+
             await self.page.setCookie(*cookies)
-            logger.info(f"Loaded {len(cookies)} cookies from {file_path}")
+            logger.info(f"Загружено {len(cookies)} cookie из файла {file_path}")
         except FileNotFoundError:
-            logger.warning(f"Cookie file not found: {file_path}. Skipping load.")
+            logger.warning(f"Файл с cookie не найден: {file_path}. Загрузка пропущена.")
         except Exception as e:
-            logger.error(f"Failed to load cookies from {file_path}: {e}")
+            logger.error(f"Ошибка при загрузке cookie из файла {file_path}: {e}")
 
-
-# --- Пример использования ---
-
-async def example_task(api_token: str):
-    cookies_file = "my_session_cookies.json"
-
-    print("--- Running first session to login and save cookies ---")
-
-    profile_manager_1 = GoLoginProfile(api_token=api_token)
-    async with profile_manager_1 as page:
-        await page.goto("https://httpbin.org/cookies")
-        print("Initial cookies:", await page.content())
-
-        # Устанавливаем cookie
-        await page.setCookie({
-            "name": "auth_token",
-            "value": "12345-secret",
-            "domain": "httpbin.org"
-        })
-
-        await page.goto("https://httpbin.org/cookies")
-        print("Cookies after login:", await page.content())
-
-        await profile_manager_1.save_cookies(cookies_file, domains=['httpbin.org'])
-
-    print("\n--- Running second session to load cookies and verify ---")
-
-    profile_manager_2 = GoLoginProfile(api_token=api_token)
-    async with profile_manager_2 as tab:
-        await tab.goto("https://httpbin.org/cookies")
-        print("Cookies before loading:", await tab.content())
-
-        await profile_manager_2.load_cookies(cookies_file)
-
-        await tab.reload()
-        print("Cookies after loading and reload:", await tab.content())
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-
-    GOLOGIN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2OGIwYjlhNGRmMDBhMTM1NGVhYWUyYTEiLCJ0eXBlIjoiZGV2Iiwiand0aWQiOiI2OGIwYjllZGQzYWE0MjA1Yjc2NzE3YTAifQ.y8kz5dmtv2SQD8IxJpbAUOAytIQ9TvJD58RuE1iRKas"
-
-    if GOLOGIN_API_TOKEN == "YOUR_GOLOGIN_API_TOKEN":
-        print("Please replace 'YOUR_GOLOGIN_API_TOKEN' with your actual token.")
-    else:
-        asyncio.run(example_task(api_token=GOLOGIN_API_TOKEN))

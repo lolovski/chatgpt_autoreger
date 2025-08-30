@@ -1,66 +1,69 @@
 # service/chatgpt_login.py
 
-import asyncio
 import logging
+import asyncio  # Добавляем импорт
 from service.gologin_profile import GoLoginProfile
-from service.sb_utils import wait_for_element_safe
-from service.email_api import TempMailClient
-from service.process_manager import process_manager
-from service.exceptions import TwoFactorRequiredError  # ИЗМЕНЕНО: импорт исключения
+from service.exceptions import TwoFactorRequiredError
 
 logger = logging.getLogger(__name__)
 
 
-# ИЗМЕНЕНО: Добавлен параметр 'code'
-async def login_chatgpt_account(token: str, email_address: str, password: str, code: str = None,
-                                process_name: str = "gpt-login"):
-    """Автовход в ChatGPT в GoLogin-профиле"""
+async def login_chatgpt_account(token: str, email_address: str, password: str, code: str = None) -> str:
+    profile = GoLoginProfile(api_token=token)
+    created_profile_id = None
 
-    async def _job():
-        profile = GoLoginProfile(api_token=token)
-        try:
-            profile.create_profile()
-            profile.start_profile()
+    try:
+        async with profile as page:
+            await page.goto("https://chatgpt.com/auth/login", {'waitUntil': 'networkidle0'})
 
-            def sync_job():
-                with profile.open_sb() as sb:
-                    sb.uc_open("https://chatgpt.com/auth/login")
-                    if not wait_for_element_safe(sb, 'button[data-testid="login-button"]', 20):
-                        raise RuntimeError("Не найдена кнопка login")
-                    sb.uc_click('button[data-testid="login-button"]')
-                    sb.type('input[name="email"]', email_address)
-                    sb.uc_click('button[type="submit"]')
+            # ИСПРАВЛЕНО: Ждем навигацию
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[data-testid="login-button"]')
+            )
 
-                    if not wait_for_element_safe(sb, 'input[name="current-password"]', 20):
-                        raise RuntimeError("Поле пароля не найдено")
-                    sb.type('input[name="current-password"]', password)
-                    sb.uc_click('button[type="submit"]')
+            await page.waitForSelector('input[name="email"]', {'timeout': 20000})
+            await page.type('input[name="email"]', email_address)
+            # ИСПРАВЛЕНО: Ждем обновление страницы
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                    # ИЗМЕНЕНО: Блок обработки 2FA без input()
-                    if sb.is_element_visible('input[name="code"]'):
-                        if code:
-                            # Если код был предоставлен, вводим его
-                            sb.type('input[name="code"]', code)
-                            sb.uc_click('button[type="submit"]')
-                            profile.stop_profile(sb=sb)
-                        else:
-                            # Если код требуется, но не был предоставлен, выбрасываем исключение
-                            profile.stop_profile(e=True)
+            await page.waitForSelector('input[name="current-password"]', {'timeout': 20000})
+            await page.type('input[name="current-password"]', password)
+            # ИСПРАВЛЕНО: Ждем финальную навигацию
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                            raise TwoFactorRequiredError("Требуется код двухфакторной аутентификации")
+            try:
+                await page.waitForSelector('input[name="code"]', {'timeout': 5000})
+                is_2fa_visible = True
+            except Exception:
+                is_2fa_visible = False
 
-                    sb.wait_for_ready_state_complete()
+            if is_2fa_visible:
+                if code:
+                    await page.type('input[name="code"]', code)
+                    await asyncio.gather(
+                        page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                        page.click('button[type="submit"]')
+                    )
+                else:
+                    raise TwoFactorRequiredError("Требуется код двухфакторной аутентификации")
 
+            await page.waitForSelector('#prompt-textarea', {'timeout': 30000})
+            logger.info(f"Успешный вход для {email_address}.")
 
-            await asyncio.to_thread(sync_job)
-            return profile.profile_id
+            cookies_path = f'cookies/{profile.profile_id}.json'
+            await profile.save_cookies(cookies_path, domains=['chatgpt.com', 'openai.com'])
 
-        except Exception as e:
-            logger.error(f"[GPT] Ошибка входа: {e}", exc_info=True)
-            profile.stop_profile(e=True)
-            # Перебрасываем исключение, чтобы его мог поймать хендлер
-            raise
+            created_profile_id = profile.profile_id
 
-    # Вместо process_manager, который скрывает исключения, вызываем напрямую
-    # Это позволит нам ловить TwoFactorRequiredError в хендлере
-    return await _job()
+        return created_profile_id
+
+    except Exception as e:
+        logger.error(f"[GPT Login] Ошибка входа для {email_address}: {e}", exc_info=True)
+        raise

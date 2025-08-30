@@ -1,95 +1,96 @@
+# service/chatgpt_register.py
+
 import asyncio
 import logging
 import random
-
 import names
-from selenium.webdriver import ActionChains
-
 from service.gologin_profile import GoLoginProfile
-from service.sb_utils import wait_for_element_safe
 from service.email_api import TempMailClient
 
 logger = logging.getLogger(__name__)
 
-async def register_chatgpt(token: str, process_name: str = "gpt-register"):
-    """Авторегистрация ChatGPT в GoLogin-профиле"""
 
-    async def _job():
-        email_client = TempMailClient()
-        profile = GoLoginProfile(api_token=token)
-        name = names.get_full_name()
-        try:
-            email = await email_client.create_account()
-            logger.info(f"[GPT] Почта создана: {email}")
+async def register_chatgpt(token: str):
+    """Авторегистрация ChatGPT в GoLogin-профиле с использованием pyppeteer."""
+    email_client = TempMailClient()
+    profile = GoLoginProfile(api_token=token)
+    full_name = names.get_full_name()
+    registration_data = None
 
-            profile.create_profile()
-            profile.start_profile()
+    try:
+        email = await email_client.create_account()
+        logger.info(f"[GPT Register] Почта создана: {email}")
 
-            # держим браузер открытым до конца
-            with profile.open_sb() as sb:
+        async with profile as page:
+            await page.goto("https://chatgpt.com/auth/login", {'waitUntil': 'networkidle0'})
 
-                def sync_signup():
-                    sb.uc_open("https://chatgpt.com/auth/login")
-                    if not wait_for_element_safe(sb, 'button[data-testid="signup-button"]', 20):
-                        raise RuntimeError("Не найдена кнопка SignUp")
-                    sb.uc_click('button[data-testid="signup-button"]')
+            # ИСПРАВЛЕНО: Ждем навигацию после клика
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[data-testid="signup-button"]')
+            )
 
-                    if not wait_for_element_safe(sb, 'input[name="email"]', 20):
-                        raise RuntimeError("Поле email не найдено")
-                    sb.type('input[name="email"]', email)
-                    sb.uc_click('button[type="submit"]')
+            await page.waitForSelector('input[name="email"]', {'timeout': 20000})
+            await page.type('input[name="email"]', email)
+            # ИСПРАВЛЕНО: Ждем навигацию после клика
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                    if not wait_for_element_safe(sb, 'input[name="new-password"]', 20):
-                        raise RuntimeError("Поле пароля не найдено")
-                    sb.type('input[name="new-password"]', email_client.password)
-                    sb.uc_click('button[type="submit"]')
+            await page.waitForSelector('input[name="new-password"]', {'timeout': 20000})
+            await page.type('input[name="new-password"]', email_client.password)
+            # ИСПРАВЛЕНО: Ждем навигацию после клика
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                await asyncio.to_thread(sync_signup)
+            code = await email_client.wait_for_code()
+            if not code:
+                raise RuntimeError("Не удалось получить код подтверждения с почты")
+            logger.info(f"[GPT Register] Код подтверждения: {code}")
 
-                # ждём код из почты
-                code = await email_client.wait_for_code()
-                if not code:
-                    raise RuntimeError("Не удалось получить код подтверждения")
-                logger.info(f"[GPT] Код подтверждения: {code}")
+            await page.waitForSelector('input[name="code"]', {'timeout': 20000})
+            await page.type('input[name="code"]', code)
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                def sync_with_code():
-                    if not wait_for_element_safe(sb, 'input[name="code"]', 20):
-                        raise RuntimeError("Поле ввода кода не найдено")
-                    sb.type('input[name="code"]', code)
-                    sb.uc_click('button[type="submit"]')
+            await page.waitForSelector('input[name="name"]', {'timeout': 20000})
+            await page.type('input[name="name"]', full_name)
 
-                    if not wait_for_element_safe(sb, 'input[name="name"]', 20):
-                        raise RuntimeError("Поле имени не найдено")
-                    sb.type('input[name="name"]', name)
+            day = str(random.randint(10, 28)).zfill(2)
+            month = str(random.randint(10, 12)).zfill(2)
+            year = str(random.randint(2000, 2002))
+            await page.keyboard.press('Tab')
+            # await page.click("button[role='combobox']")
+            await page.keyboard.type(f"{month}{day}{year}")
 
-                    sb.click("span._typeableLabel_afhkj_73:contains('Birthday')")
-                    day = random.randint(5, 27)
-                    month = random.randint(5, 11)
-                    year = 2000
-                    for ch in f"{day}{month}{year}":
-                        ActionChains(sb.driver).send_keys(ch).perform()
+            # ИСПРАВЛЕНО: Ждем навигацию после финального клика
+            await asyncio.gather(
+                page.waitForNavigation({'waitUntil': 'networkidle0'}),
+                page.click('button[type="submit"]')
+            )
 
-                    sb.uc_click('button[type="submit"]')
+            await page.waitForSelector('#prompt-textarea', {'timeout': 40000})
+            logger.info("Регистрация успешно завершена!")
 
-                    sb.wait_for_ready_state_complete()
+            cookies_path = f'cookies/{profile.profile_id}.json'
+            await profile.save_cookies(cookies_path, domains=['chatgpt.com', 'openai.com'])
 
-                await asyncio.to_thread(sync_with_code)
-
-            profile.stop_profile(sb=sb)
-            return {
+            registration_data = {
                 'email_address': email,
                 'id': profile.profile_id,
                 'password': email_client.password,
-                'name': name
+                'name': full_name
             }
 
-        except Exception as e:
-            profile.stop_profile(e=True)
-            logger.error(f"[GPT] Ошибка регистрации: {e}", exc_info=True)
-            raise
-        finally:
-            await email_client.close()
+        return registration_data
 
-    process_manager.start(process_name, _job())
-    return await process_manager.result(process_name)
-
+    except Exception as e:
+        logger.error(f"[GPT Register] Ошибка регистрации: {e}", exc_info=True)
+        raise
+    finally:
+        await email_client.close()

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from seleniumbase import SB
 from service.email_api import TempMailClient
 from service.sb_utils import *
 logger = logging.getLogger(__name__)

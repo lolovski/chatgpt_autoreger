@@ -1,6 +1,9 @@
 # service/gologin_api_client.py
 import asyncio
+import json
 import logging
+import os
+
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from gologin import GoLogin
@@ -55,10 +58,25 @@ class GoLoginAPIClient:
             response = await self.client.request(method, url, **kwargs)
             if response.status_code >= 400:
                 raise GoLoginAPIError(response.status_code, response.text)
-            return response.json() if response.text else {}
+            if not response.text:
+                # Успешный ответ, но с пустым телом.
+                return {}
+            try:
+                # Пытаемся декодировать JSON из успешного ответа.
+                return response.json()
+            except json.JSONDecodeError:
+                # Редкий случай: успешный код, но тело - не JSON.
+                # Логируем это как серьезную ошибку API.
+                logger.error(
+                    f"GoLogin API вернул не-JSON ответ для успешного запроса ({response.status_code}). "
+                    f"Текст: {response.text[:200]}"
+                )
+                # Вызываем ошибку, чтобы не продолжать работу с некорректными данными.
+                raise GoLoginAPIError(response.status_code, "Invalid JSON in successful response from GoLogin API.")
+
         except GoLoginAPIError as e:
             logger.error(f"GoLogin API returned an error: {e}")
-            raise  # Перебрасываем исключение, чтобы не делать retry на 4xx/5xx ошибках
+            raise
         except httpx.TimeoutException as e:
             logger.error(f"GoLogin API request timed out: {e}")
             raise
@@ -112,30 +130,68 @@ class GoLoginAPIClient:
         """Запускает удаленный профиль Orbita и возвращает wsUrl с таймаутом и ретраями."""
         logger.info(f"Starting remote profile {profile_id}")
 
+        project_root = os.getcwd()
+        profiles_dir = os.path.join(project_root, 'gologin_profiles')
+        os.makedirs(profiles_dir, exist_ok=True)
+        profile_path = os.path.join(profiles_dir, profile_id)
+
         gl = GoLogin(
             {
                 "token": self.api_token,
-                "profile_id": profile_id
+                "profile_id": profile_id,
+                "tmpdir": profile_path
+
             }
         )
 
         try:
-            ws_url = await asyncio.wait_for(
+            # Запускаем синхронную библиотеку в отдельном потоке
+            response = await asyncio.wait_for(
                 asyncio.to_thread(gl.start), timeout=self.timeout
             )
+
+            # Библиотека gologin.start() возвращает словарь, а не просто wsUrl
+            if not response:
+                raise GoLoginAPIError(0, f"Failed to get wsUrl for profile {profile_id}. Response: {response}")
+
+            logger.info(f"Profile {profile_id} started successfully.")
+            return response
+
         except asyncio.TimeoutError:
             raise GoLoginAPIError(0, f"Timeout while starting profile {profile_id}")
 
-        if not ws_url:
-            raise GoLoginAPIError(0, f"Failed to get wsUrl for profile {profile_id}")
-
-        logger.info(f"Profile {profile_id} started successfully: {ws_url}")
-        return ws_url
-
+            # НОВЫЙ БЛОК ОБРАБОТКИ ОШИБКИ
+        except ValueError as e:
+            logger.error(f"Corrupted fingerprint detected for profile {profile_id}. Error: {e}")
+            raise GoLoginAPIError(
+                status_code=422,  # 422 Unprocessable Entity - подходящий код для "битых" данных
+                text="Profile fingerprint is corrupted or incomplete. Cannot start."
+            )
 
     async def close(self):
         """Закрывает HTTP-клиент."""
         await self.client.aclose()
+
+    async def test_token(self) -> bool:
+        """
+        Проверяет валидность токена, делая легкий запрос к API.
+        Возвращает True, если токен рабочий, и False, если он невалиден или исчерпал лимиты.
+        """
+        try:
+            # Делаем простой запрос, который должен работать с любым валидным токеном
+            await self._request("GET", "/user")
+            return True
+        except GoLoginAPIError as e:
+            # Если поймали ошибку лимита (403) или неверного токена (401), токен невалиден.
+            if e.status_code in [401, 403]:
+                logger.warning(f"Тест токена провален (статус {e.status_code}). Токен невалиден или исчерпал лимит.")
+                return False
+            # Если другая ошибка, лучше ее пробросить, но для простой проверки можно считать невалидным
+            logger.error(f"Непредвиденная ошибка API при тесте токена: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Сетевая ошибка при тесте токена: {e}")
+            return False
 
 
 """async def main():

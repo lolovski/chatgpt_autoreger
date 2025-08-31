@@ -52,6 +52,17 @@ class AccountGoLogin(Base):
         await db_session.close()
         return result.scalars().first()
 
+    @classmethod
+    async def update(cls, id: int, **kwargs):
+        db_session = await session()
+        result = await db_session.execute(select(cls).where(cls.id == id))
+        account = result.scalars().first()
+        for key, value in kwargs.items():
+            setattr(account, key, value)
+        await db_session.commit()
+        await db_session.close()
+        return account
+
 
 
 

@@ -84,7 +84,6 @@ async def register_chatgpt(token: str):
                 'email_address': email,
                 'id': profile.profile_id,
                 'password': email_client.password,
-                'name': full_name
             }
 
         return registration_data

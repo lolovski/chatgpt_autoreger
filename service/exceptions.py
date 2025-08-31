@@ -8,3 +8,6 @@ class GoLoginTimeoutError(Exception):
 
 class GoLoginProfileError(Exception):
     pass
+
+class NoValidGoLoginAccountsError(Exception):
+    pass

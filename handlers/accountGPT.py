@@ -1,5 +1,6 @@
 # handlers/accountGPT.py
 
+import math
 from aiogram import Router, Bot, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
@@ -7,172 +8,248 @@ from aiogram.types import Message, CallbackQuery
 from FSM import *
 from callbacks import *
 from db.models import *
+from keyboard.accountGPT import ACCOUNTS_PER_PAGE  # Импортируем константу
 from keyboard import *
 from phrases import *
 from service import *
-
+from service.exceptions import TwoFactorRequiredError
 
 accountGPT_router = Router(name='accountGPT')
 
 
-# ... (хендлеры gpt_menu_handler, create_gpt_account_handler, manual_create_gpt_account_handler, manual_create_gpt_account_data_handler остаются без изменений)
-@accountGPT_router.callback_query(NavigationCallback.filter(F.menu == 'chatGPT'))
-async def gpt_menu_handler(callback: CallbackQuery, bot: Bot, state: FSMContext):
+# --- ГЛАВНОЕ МЕНЮ И ПАГИНАТОР ---
+@accountGPT_router.callback_query(NavigationCallback.filter(F.menu.in_(['chatGPT', 'gpt_page'])))
+async def gpt_menu_handler(callback: CallbackQuery, state: FSMContext, callback_data: NavigationCallback):
     await state.clear()
-    accounts = await AccountGPT.get_multi()
-    await callback.message.edit_text(text=gpt_menu_text, reply_markup=gpt_menu_keyboard(accounts=accounts))
+    page = int(callback_data.params) if callback_data.menu == 'gpt_page' else 1
+
+    total_accounts = await AccountGPT.get_count()
+    if total_accounts == 0:
+        # Если аккаунтов нет, показываем "пустое" меню
+        return await callback.message.edit_text(
+            text=gpt_menu_text,
+            reply_markup=gpt_menu_keyboard(accounts=[], page=1, total_pages=1)
+        )
+
+    total_pages = math.ceil(total_accounts / ACCOUNTS_PER_PAGE)
+    offset = (page - 1) * ACCOUNTS_PER_PAGE
+    accounts = await AccountGPT.get_multi(limit=ACCOUNTS_PER_PAGE, offset=offset)
+
+    await callback.message.edit_text(
+        text=f"{gpt_menu_text}\n\n{paginator_text(page, total_pages)}",
+        reply_markup=gpt_menu_keyboard(accounts=accounts, page=page, total_pages=total_pages)
+    )
 
 
+# --- ПРОСМОТР АККАУНТА ---
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'account'))
+async def gpt_account_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, state: FSMContext):
+    await state.clear()
+    db_account = await AccountGPT.get(id=callback_data.params)
+    if not db_account:
+        await callback.answer("Аккаунт не найден, возможно, он был удален.", show_alert=True)
+        # Обновляем меню на случай, если аккаунт удалили
+        await gpt_menu_handler(callback, state, NavigationCallback(menu='chatGPT', params='1'))
+        return
+
+    await callback.message.edit_text(
+        text=gpt_account_text(db_account),
+        reply_markup=gpt_account_keyboard(account=db_account)
+    )
+
+
+# --- БЛОК СОЗДАНИЯ АККАУНТОВ ---
 @accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'create'))
-async def create_gpt_account_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(text=choice_create_gpt_account_text,
-                                     reply_markup=choice_create_gpt_account_keyboard())
+async def create_gpt_account_handler(callback: CallbackQuery):
+    await callback.message.edit_text(
+        text=choice_create_gpt_account_text,
+        reply_markup=choice_create_gpt_account_keyboard()
+    )
 
 
+# --- Автоматическое создание ---
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'auto_create'))
+async def auto_create_gpt_account_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AccountGPTForm.auto_create_name)
+    await callback.message.edit_text(
+        text=auto_create_name_prompt_text,
+        reply_markup=cancel_fsm_keyboard()
+    )
+
+
+@accountGPT_router.message(AccountGPTForm.auto_create_name)
+async def auto_create_name_handler(message: Message, state: FSMContext):
+    account_name = message.text
+    await state.clear()
+    await message.answer(wait_manual_create_gpt_account_text)
+
+    # Автоматический выбор GoLogin профиля
+    account_go_login = await AccountGoLogin.get_first_valid()
+    if not account_go_login:
+        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
+        return
+
+    try:
+        # ИЗМЕНЕНО: Используем ротатор
+        data, _ = await execute_with_gologin_rotation(
+            operation=register_chatgpt
+            # Передаем только те аргументы, что нужны самому сервису (кроме 'token')
+        )
+        db_account = await AccountGPT(
+            **data,
+            name=account_name,  # Используем имя от пользователя
+            accountGoLogin_id=account_go_login.id
+        ).create()
+
+        await message.answer(
+            create_gpt_account_success_text + "\n\n" + gpt_account_text(db_account),
+            reply_markup=gpt_account_keyboard(db_account)
+        )
+    except NoValidGoLoginAccountsError:
+        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
+    except Exception as e:
+        await message.answer(
+            create_gpt_account_error_text + f"\n\nОшибка: {e}",
+            reply_markup=main_menu_keyboard()
+        )
+
+
+# --- Ручное создание ---
 @accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'manual_create'))
-async def manual_create_gpt_account_handler(callback: CallbackQuery, bot: Bot, state: FSMContext):
+async def manual_create_gpt_account_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AccountGPTForm.account_data)
-    await callback.message.edit_text(text=gpt_manual_prompt_text, reply_markup=manual_create_gpt_account_keyboard())
+    await callback.message.edit_text(
+        text=gpt_manual_prompt_text,
+        reply_markup=cancel_fsm_keyboard()
+    )
 
 
 @accountGPT_router.message(AccountGPTForm.account_data)
-async def manual_create_gpt_account_data_handler(message: Message, bot: Bot, state: FSMContext):
+async def manual_create_gpt_account_data_handler(message: Message, state: FSMContext):
     try:
         email, password, name = message.text.split(":")
-        await state.update_data(account_data=f'{email}:{password}:{name}')
-    except ValueError as e:
+    except ValueError:
         return await message.answer(text=chatgpt_error_format_text)
-    go_login_accounts = await AccountGoLogin.get_multi()
-    await message.answer(text=choose_go_login_account_text,
-                         reply_markup=choice_go_login_account_keyboard(accounts=go_login_accounts,
-                                                                       action='manual_gologin'))
 
-@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'manual_gologin'))
-async def manual_create_gpt_account_email_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, bot: Bot,
-                                                  state: FSMContext):
-    go_login_id = int(callback_data.params)
-    account_go_login = await AccountGoLogin.get(id=go_login_id)
-    data = await state.get_data()
-    email_address, password, name = data.get('account_data').split(":")
+    await state.clear()
+    await message.answer(wait_manual_create_gpt_account_text)
 
-    await callback.message.edit_text("Попытка входа в аккаунт...")
-
-    try:
-        # ИЗМЕНЕНО: login_chatgpt_account теперь возвращает ID нового профиля
-        new_profile_id = await login_chatgpt_account(
-            token=account_go_login.api_token,
-            email_address=email_address,
-            password=password,
-        )
-
-        db_account = await AccountGPT(
-            email_address=email_address,
-            password=password,
-            name=name,
-            accountGoLogin_id=account_go_login.id,
-            id=new_profile_id # Используем полученный ID
-        ).create()
-        await state.clear()
-        await callback.message.edit_text(text=create_gpt_account_success_text + gpt_account_text(db_account),
-                                         reply_markup=gpt_account_keyboard(account=db_account))
-
-    except TwoFactorRequiredError:
-        await state.update_data(
-            action_type='manual_login',
-            go_login_id=go_login_id,
-            email_address=email_address,
-            password=password,
-            name=name
-        )
-        await state.set_state(AccountGPTForm.wait_for_2fa_code)
-        await callback.message.edit_text("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
-
-    except Exception as e:
-        await state.clear()
-        await callback.message.edit_text(text=create_gpt_account_error_text + f"\n\nОшибка: {e}",
-                                         reply_markup=main_menu_keyboard())
-
-
-@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'account'))
-async def gpt_account_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, bot: Bot):
-    db_account = await AccountGPT.get(id=callback_data.params)
-    await callback.message.edit_text(text=gpt_account_text(db_account),
-                                     reply_markup=gpt_account_keyboard(account=db_account))
-
-
-@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'auto_create'))
-async def auto_create_gpt_account_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, bot: Bot,
-                                          state: FSMContext):
-    go_login_accounts = await AccountGoLogin.get_multi()
-    await callback.message.edit_text(text=choose_go_login_account_text,
-                                     reply_markup=choice_go_login_account_keyboard(accounts=go_login_accounts,
-                                                                                   action='auto_gologin'))
-
-
-@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'auto_gologin'))
-async def auto_gologin_gpt_account_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, bot: Bot,
-                                           state: FSMContext):
-    await callback.message.edit_text(wait_manual_create_gpt_account_text)
-    go_login_id = int(callback_data.params)
-    account_go_login = await AccountGoLogin.get(id=go_login_id)
-    try:
-        # register_chatgpt теперь тоже полностью асинхронный
-        data = await register_chatgpt(account_go_login.api_token)
-        db_account = await AccountGPT(
-            **data,
-            accountGoLogin_id=go_login_id
-        ).create()
-        await state.clear()
-        await callback.message.edit_text(text=create_gpt_account_success_text + gpt_account_text(db_account),
-                                         reply_markup=gpt_account_keyboard(db_account))
-
-    except Exception as e:
-        print(e)
-        await callback.message.edit_text(text=create_gpt_account_error_text,
-                                         reply_markup=main_menu_keyboard())
-
-
-# УПРОЩЕНО
-@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'launch'))
-async def launch_account_gpt_handler(callback: CallbackQuery, callback_data: AccountGPTCallback, bot: Bot,
-                                     state: FSMContext):
-    await callback.message.edit_text(text=wait_manual_create_gpt_account_text)
-    db_account = await AccountGPT.get(id=callback_data.params)
-
-    # ИЗМЕНЕНО: Логика выбора токена упрощена. Мы всегда пытаемся использовать привязанный.
-    # Если он невалиден, GoLoginAPI вернет ошибку.
-    # Для гибкости можно оставить поиск валидного, как было. Выберем более простой вариант.
-    if not db_account.accountGoLogin or not db_account.accountGoLogin.valid:
-        await callback.message.edit_text("❌ Привязанный GoLogin аккаунт не найден или невалиден.",
-                                         reply_markup=gpt_account_keyboard(account=db_account))
+    # Автоматический выбор GoLogin профиля
+    account_go_login = await AccountGoLogin.get_first_valid()
+    if not account_go_login:
+        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
         return
 
-    token = db_account.accountGoLogin.api_token
-
     try:
-        # Убрали флаг valid, т.к. сервис сам разберется, нужна ли повторная авторизация
-        await restart_chatgpt_account(
-            token=token,
-            account=db_account
+        new_profile_id, gologin_for_task = await execute_with_gologin_rotation(
+            operation=login_chatgpt_account,
+            email_address=email,
+            password=password
         )
-        await callback.message.edit_text(launch_account_gpt_text + gpt_account_text(account=db_account),
-                                         reply_markup=gpt_account_keyboard(account=db_account))
+        db_account = await AccountGPT(
+            email_address=email, password=password, name=name,
+            accountGoLogin_id=gologin_for_task.id, id=new_profile_id
+        ).create()
 
+        await message.answer(
+            create_gpt_account_success_text + "\n\n" + gpt_account_text(db_account),
+            reply_markup=gpt_account_keyboard(db_account)
+        )
     except TwoFactorRequiredError:
+        # Логика 2FA остается на случай, если она понадобится
         await state.update_data(
-            action_type='restart',
-            account_id=db_account.id,
-            token=token
+            action_type='manual_login', go_login_id=account_go_login.id,
+            email_address=email, password=password, name=name
         )
         await state.set_state(AccountGPTForm.wait_for_2fa_code)
-        await callback.message.edit_text("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
-
+        await message.answer("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
+    except NoValidGoLoginAccountsError:
+        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
     except Exception as e:
-        await callback.message.edit_text(error_launch_account_gpt_text + f"\n\nОшибка: {e}",
-                                         reply_markup=gpt_account_keyboard(account=db_account))
+        await message.answer(
+            create_gpt_account_error_text + f"\n\nОшибка: {e}",
+            reply_markup=main_menu_keyboard()
+        )
 
 
-# НОВЫЙ ХЕНДЛЕР: Обрабатывает ввод 2FA кода от пользователя (логика почти не изменилась)
+# --- БЛОК УПРАВЛЕНИЯ АККАУНТОМ ---
+
+# --- Запуск ---
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'launch'))
+async def launch_account_gpt_handler(callback: CallbackQuery, state: FSMContext, callback_data: AccountGPTCallback):
+    await callback.message.edit_text(text=launch_account_gpt_text)
+    db_account = await AccountGPT.get(id=callback_data.params)
+
+    try:
+        # Просто вызываем наш "умный" сервис
+        final_account = await restart_and_heal_chatgpt_account(account=db_account)
+
+        # Показываем пользователю финальный, актуальный результат
+        await callback.message.edit_text(
+            f"<b>✅ Профиль запущен и готов к работе!</b>\n\n{gpt_account_text(final_account)}",
+            reply_markup=gpt_account_keyboard(account=final_account)
+        )
+
+    except NoValidGoLoginAccountsError:
+        await callback.message.edit_text(
+            no_valid_gologin_accounts_error,
+            reply_markup=gpt_account_keyboard(account=db_account)
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            error_launch_account_gpt_text + f"\n\n<b>Ошибка:</b> <code>{e}</code>",
+            reply_markup=gpt_account_keyboard(account=db_account)
+        )
+# --- Переименование ---
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'rename'))
+async def rename_gpt_account_handler(callback: CallbackQuery, state: FSMContext, callback_data: AccountGPTCallback):
+    await state.set_state(AccountGPTForm.rename_account)
+    await state.update_data(account_id=callback_data.params)
+    await callback.message.edit_text(
+        text=rename_prompt_text,
+        reply_markup=cancel_fsm_keyboard()
+    )
+
+
+@accountGPT_router.message(AccountGPTForm.rename_account)
+async def process_rename_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    account_id = data.get('account_id')
+    new_name = message.text
+
+    db_account = await AccountGPT.get(id=account_id)
+    await db_account.update(name=new_name)
+    await state.clear()
+
+    # Обновляем информацию в сообщении
+    db_account.name = new_name  # Обновляем локальный объект для отображения
+    await message.answer(rename_success_text)
+    await message.answer(
+        text=gpt_account_text(db_account),
+        reply_markup=gpt_account_keyboard(account=db_account)
+    )
+
+
+# --- Удаление ---
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'delete'))
+async def delete_gpt_account_handler(callback: CallbackQuery, callback_data: AccountGPTCallback):
+    db_account = await AccountGPT.get(id=callback_data.params)
+    await callback.message.edit_text(
+        text=confirm_delete_text(db_account.name),
+        reply_markup=confirm_delete_keyboard(account_id=db_account.id)
+    )
+
+
+@accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'confirm_delete'))
+async def confirm_delete_gpt_account_handler(callback: CallbackQuery, state: FSMContext,
+                                             callback_data: AccountGPTCallback):
+    db_account = await AccountGPT.get(id=callback_data.params)
+    await db_account.delete()
+    await callback.answer(account_deleted_text, show_alert=True)
+    # Возвращаем пользователя в меню, которое само обновит список
+    await gpt_menu_handler(callback, state, NavigationCallback(menu='chatGPT', params='1'))
+
+
 @accountGPT_router.message(AccountGPTForm.wait_for_2fa_code)
 async def process_2fa_code_handler(message: Message, bot: Bot, state: FSMContext):
     code = message.text
@@ -207,15 +284,17 @@ async def process_2fa_code_handler(message: Message, bot: Bot, state: FSMContext
 
         elif action_type == 'restart':
             db_account = await AccountGPT.get(id=data.get('account_id'))
-            token = data.get('token')
+            gologin_account = await AccountGoLogin.get(id=data.get('gologin_id'))
 
             # Вызываем сервис еще раз, но уже с кодом
             await restart_chatgpt_account(
-                token=token,
+                token=gologin_account.api_token,
                 account=db_account,
                 code=code
             )
+
             await state.clear()
+            updated_account = await AccountGPT.get(id=db_account.id)
             await message.answer(launch_account_gpt_text + gpt_account_text(account=db_account),
                                  reply_markup=gpt_account_keyboard(account=db_account))
         else:

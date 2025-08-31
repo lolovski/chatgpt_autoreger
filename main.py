@@ -3,6 +3,7 @@ import locale
 import logging
 import sys
 
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -20,6 +21,8 @@ bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=Pars
 
 dp = Dispatcher()
 dp.update.middleware.register(UserMiddleware())
+
+
 
 
 async def main():

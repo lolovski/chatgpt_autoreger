@@ -8,6 +8,7 @@ from db.models import AccountGPT, AccountGoLogin
 from service import GoLoginAPIError, GoLoginAPIClient
 from service.gologin_profile import GoLoginProfile
 from service.exceptions import TwoFactorRequiredError, NoValidGoLoginAccountsError
+from service.gpt_login_processor import execute_login_flow
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str, code
             # Пытаемся запустить текущий профиль
             await _run_browser_session(token=linked_gologin.api_token, account=account, code=code)
             logger.info("Успешный запуск с существующими данными.")
+
             return account  # Если все хорошо, возвращаем исходный аккаунт
         except GoLoginAPIError as e:
             # Если профиль "битый" (422) или не найден (404), или токен исчерпан (403) - переходим к "лечению"
@@ -150,7 +152,7 @@ async def _run_browser_session(token: str, account: AccountGPT, cookies_to_load_
     """Вспомогательная функция, которая запускает браузер и управляет сессией."""
     profile = GoLoginProfile(api_token=token, profile_id=account.id)
     async with profile as page:
-
+        await page.goto('https://chatgpt.com')
         # Если указан путь для загрузки - грузим куки (сценарий "лечения")
         # Иначе - грузим куки самого аккаунта (сценарий "счастливого пути")
         path_to_load = cookies_to_load_path or account.cookies_path
@@ -160,12 +162,10 @@ async def _run_browser_session(token: str, account: AccountGPT, cookies_to_load_
             await profile.load_cookies(path_to_load)
         except FileNotFoundError:
             logger.warning(f"Файл cookie {path_to_load} не найден. Пробуем войти без него.")
-
-        await page.goto("https://chatgpt.com/", {'waitUntil': 'networkidle0'})
-
         is_login_needed = "auth" in page.url or await page.querySelector('button[data-testid="login-button"]')
         if is_login_needed:
-            await _perform_login(page, account, code)
+            # ИЗМЕНЕНО: Вызываем новый процессор вместо _perform_login
+            await execute_login_flow(page, account, code)
 
         logger.info(f"Сессия в профиле {account.id} активна. Сохраняем cookie.")
         await profile.save_cookies(account.cookies_path, domains=['chatgpt.com', 'openai.com'])

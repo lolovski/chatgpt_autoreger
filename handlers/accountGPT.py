@@ -93,7 +93,8 @@ async def auto_create_name_handler(message: Message, state: FSMContext):
         db_account = await AccountGPT(
             **data,
             name=account_name,
-            accountGoLogin_id=used_gologin.id  # Привязываем использованный аккаунт
+            accountGoLogin_id=used_gologin.id,  # Привязываем использованный аккаунт
+            auto_create=True
         ).create()
 
         await message.answer(
@@ -131,31 +132,30 @@ async def manual_create_gpt_account_data_handler(message: Message, state: FSMCon
 
     # Автоматический выбор GoLogin профиля
     try:
-        # Снова просто вызываем ротатор
         new_profile_id, used_gologin = await execute_with_gologin_rotation(
             operation=login_chatgpt_account,
             message_interface=message,
-            email_address=email,  # Передаем доп. аргументы для login_chatgpt_account
-            password=password
+            email_address=email, password=password, name=name
         )
 
         db_account = await AccountGPT(
             email_address=email, password=password, name=name,
-            accountGoLogin_id=used_gologin.id, id=new_profile_id
+            accountGoLogin_id=used_gologin.id, id=new_profile_id,
+            auto_create=False
         ).create()
 
         await message.answer(
             create_gpt_account_success_text + "\n\n" + gpt_account_text(db_account),
             reply_markup=gpt_account_keyboard(db_account)
         )
-    except TwoFactorRequiredError:
-        # Логика 2FA остается на случай, если она понадобится
-        await state.update_data(
-            action_type='manual_login',
-            email_address=email, password=password, name=name
-        )
-        await state.set_state(AccountGPTForm.wait_for_2fa_code)
-        await message.answer("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
+    except VerificationCodeRequiredError as e: # <-- Ловим новое исключение
+        if e.is_manual_input_needed:
+            await state.update_data(
+                action_type='manual_login',
+                email_address=email, password=password, name=name
+            )
+            await state.set_state(AccountGPTForm.wait_for_2fa_code)
+            await message.answer(code_input_text) # <-- Используем фразу
     except NoValidGoLoginAccountsError:
         await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
     except Exception as e:
@@ -191,14 +191,16 @@ async def launch_account_gpt_handler(callback: CallbackQuery, state: FSMContext,
             no_valid_gologin_accounts_error,
             reply_markup=gpt_account_keyboard(account=db_account)
         )
-    except TwoFactorRequiredError:
-        # Логика 2FA остается на случай, если она понадобится
-        await state.update_data(
-            action_type='restart',
-            account_id=db_account.id,
-        )
-        await state.set_state(AccountGPTForm.wait_for_2fa_code)
-        await callback.message.answer("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
+    except VerificationCodeRequiredError as e:  # <-- Ловим новое исключение
+        if e.is_manual_input_needed:
+            await state.update_data(action_type='restart', account_id=db_account.id)
+            await state.set_state(AccountGPTForm.wait_for_2fa_code)
+            await callback.message.answer(code_input_text)  # <-- Используем фразу
+        else:
+            await callback.message.edit_text(
+                error_launch_account_gpt_text + "\n\n<b>Ошибка:</b> <code>Не удалось автоматически получить код подтверждения.</code>",
+                reply_markup=gpt_account_keyboard(account=db_account)
+            )
     except Exception as e:
         await callback.message.edit_text(
             error_launch_account_gpt_text + f"\n\n<b>Ошибка:</b> <code>{e}</code>",
@@ -273,11 +275,8 @@ async def process_2fa_code_handler(message: Message, bot: Bot, state: FSMContext
                 new_profile_id, used_gologin = await execute_with_gologin_rotation(
                     operation=login_chatgpt_account,
                     message_interface=message,
-                    email_address=email_address,  # Передаем доп. аргументы для login_chatgpt_account
-                    password=password,
-                    code=code
+                    email_address=email_address, password=password, name=name, code=code
                 )
-
                 db_account = await AccountGPT(
                     email_address=email_address, password=password, name=name,
                     accountGoLogin_id=used_gologin.id, id=new_profile_id

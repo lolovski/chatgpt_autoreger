@@ -13,20 +13,21 @@ class AccountGPT(Base):
     email_address = Column(String, unique=True)
     password = Column(String)
     cookies_path = Column(String)
+    auto_create = Column(Boolean, default=True)
     accountGoLogin_id = Column(
         ForeignKey('accountGoLogin.id', ondelete="SET NULL"),
         nullable=True
     )
     accountGoLogin = relationship('AccountGoLogin', back_populates="accountsGPT", lazy='selectin', foreign_keys=[accountGoLogin_id])
-    auto_create = Column(Boolean, default=True)
 
-    def __init__(self, name: str, email_address: str, password: str, id: str, accountGoLogin_id: int = None):
+    def __init__(self, name: str, email_address: str, password: str, id: str, accountGoLogin_id: int = None, auto_create: bool = True):
         self.id = id
         self.name = name
         self.email_address = email_address
         self.password = password
         self.cookies_path = f'cookies/{id}.json'
         self.accountGoLogin_id = accountGoLogin_id
+        self.auto_create = auto_create
 
     async def create(self):
         db_session = await session()

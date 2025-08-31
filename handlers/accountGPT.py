@@ -17,6 +17,7 @@ from service.exceptions import TwoFactorRequiredError
 accountGPT_router = Router(name='accountGPT')
 
 
+
 # --- ГЛАВНОЕ МЕНЮ И ПАГИНАТОР ---
 @accountGPT_router.callback_query(NavigationCallback.filter(F.menu.in_(['chatGPT', 'gpt_page'])))
 async def gpt_menu_handler(callback: CallbackQuery, state: FSMContext, callback_data: NavigationCallback):
@@ -83,22 +84,16 @@ async def auto_create_name_handler(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(wait_manual_create_gpt_account_text)
 
-    # Автоматический выбор GoLogin профиля
-    account_go_login = await AccountGoLogin.get_first_valid()
-    if not account_go_login:
-        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
-        return
-
     try:
         # ИЗМЕНЕНО: Используем ротатор
-        data, _ = await execute_with_gologin_rotation(
-            operation=register_chatgpt
-            # Передаем только те аргументы, что нужны самому сервису (кроме 'token')
+        data, used_gologin = await execute_with_gologin_rotation(
+            operation=register_chatgpt,
+            message_interface=message
         )
         db_account = await AccountGPT(
             **data,
-            name=account_name,  # Используем имя от пользователя
-            accountGoLogin_id=account_go_login.id
+            name=account_name,
+            accountGoLogin_id=used_gologin.id  # Привязываем использованный аккаунт
         ).create()
 
         await message.answer(
@@ -135,20 +130,18 @@ async def manual_create_gpt_account_data_handler(message: Message, state: FSMCon
     await message.answer(wait_manual_create_gpt_account_text)
 
     # Автоматический выбор GoLogin профиля
-    account_go_login = await AccountGoLogin.get_first_valid()
-    if not account_go_login:
-        await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
-        return
-
     try:
-        new_profile_id, gologin_for_task = await execute_with_gologin_rotation(
+        # Снова просто вызываем ротатор
+        new_profile_id, used_gologin = await execute_with_gologin_rotation(
             operation=login_chatgpt_account,
-            email_address=email,
+            message_interface=message,
+            email_address=email,  # Передаем доп. аргументы для login_chatgpt_account
             password=password
         )
+
         db_account = await AccountGPT(
             email_address=email, password=password, name=name,
-            accountGoLogin_id=gologin_for_task.id, id=new_profile_id
+            accountGoLogin_id=used_gologin.id, id=new_profile_id
         ).create()
 
         await message.answer(
@@ -158,7 +151,7 @@ async def manual_create_gpt_account_data_handler(message: Message, state: FSMCon
     except TwoFactorRequiredError:
         # Логика 2FA остается на случай, если она понадобится
         await state.update_data(
-            action_type='manual_login', go_login_id=account_go_login.id,
+            action_type='manual_login', go_login_id=used_gologin.id,
             email_address=email, password=password, name=name
         )
         await state.set_state(AccountGPTForm.wait_for_2fa_code)
@@ -182,8 +175,11 @@ async def launch_account_gpt_handler(callback: CallbackQuery, state: FSMContext,
 
     try:
         # Просто вызываем наш "умный" сервис
-        final_account = await restart_and_heal_chatgpt_account(account=db_account)
-
+        final_account, used_gologin = await execute_with_gologin_rotation(
+            operation=restart_and_heal_chatgpt_account,  # Используем простой сервис
+            message_interface=callback,
+            account=db_account  # Передаем доп. аргумент
+        )
         # Показываем пользователю финальный, актуальный результат
         await callback.message.edit_text(
             f"<b>✅ Профиль запущен и готов к работе!</b>\n\n{gpt_account_text(final_account)}",

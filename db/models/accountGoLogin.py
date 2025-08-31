@@ -46,6 +46,13 @@ class AccountGoLogin(Base):
         return result.scalars().first()
 
     @classmethod
+    async def get_by_token(cls, token: str):
+        db_session = await session()
+        result = await db_session.execute(select(cls).where(cls.api_token == token))
+        await db_session.close()
+        return result.scalars().first()
+
+    @classmethod
     async def get_first_valid(cls):
         db_session = await session()
         result = await db_session.execute(select(cls).where(cls.valid == 1).order_by(cls.registration_date.asc()))

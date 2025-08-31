@@ -55,7 +55,7 @@ async def _perform_login(page, account: AccountGPT, code: str = None):
     await page.waitForSelector('#prompt-textarea', {'timeout': 30000})
 
 
-async def restart_and_heal_chatgpt_account(account: AccountGPT) -> AccountGPT:
+async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str) -> AccountGPT:
     """
     "Лечит" и перезапускает аккаунт ChatGPT.
     1. Пытается запустить существующий профиль с привязанным токеном.
@@ -79,7 +79,7 @@ async def restart_and_heal_chatgpt_account(account: AccountGPT) -> AccountGPT:
                 logger.warning(
                     f"Не удалось запустить существующий профиль ({e.status_code}). Причина: {e.text}. Начинаем процедуру восстановления.")
                 if e.status_code == 403:  # Если проблема в токене, помечаем его
-                    await linked_gologin.mark_as_invalid()
+                    await AccountGoLogin.update(linked_gologin.id, valid=False)
             else:
                 raise  # Другие ошибки API пробрасываем
         except Exception:
@@ -88,62 +88,60 @@ async def restart_and_heal_chatgpt_account(account: AccountGPT) -> AccountGPT:
     # --- Попытка №2: "Лечение" - создание нового профиля и перенос сессии ---
     logger.info(f"Начинаем поиск рабочего GoLogin аккаунта для создания нового профиля.")
 
-    while True:
-        working_gologin = await AccountGoLogin.get_first_valid()
-        if not working_gologin:
-            raise NoValidGoLoginAccountsError()
+    if not token:
+        raise NoValidGoLoginAccountsError()
+    working_gologin = await AccountGoLogin.get_by_token(token)
+    api_client = GoLoginAPIClient(api_token=token)
+    try:
+        # 1. Создаем абсолютно новый профиль GoLogin
+        logger.info(f"Создаем новый профиль GoLogin с помощью токена {working_gologin.id}")
+        new_profile_data = await api_client.create_quick_profile(name=f"healed_{account.name}")
+        new_profile_id = new_profile_data.get("id")
 
-        api_client = GoLoginAPIClient(api_token=working_gologin.api_token)
-        try:
-            # 1. Создаем абсолютно новый профиль GoLogin
-            logger.info(f"Создаем новый профиль GoLogin с помощью токена {working_gologin.id}")
-            new_profile_data = await api_client.create_quick_profile(name=f"healed_{account.name}")
-            new_profile_id = new_profile_data.get("id")
+        # 2. Создаем временный объект AccountGPT для запуска браузерной сессии
+        temp_new_account = AccountGPT(
+            id=new_profile_id, name=account.name,
+            email_address=account.email_address, password=account.password
+        )
 
-            # 2. Создаем временный объект AccountGPT для запуска браузерной сессии
-            temp_new_account = AccountGPT(
-                id=new_profile_id, name=account.name,
-                email_address=account.email_address, password=account.password
-            )
+        # 3. Запускаем сессию в НОВОМ профиле и переносим куки из СТАРОГО
+        await _run_browser_session(
+            token=working_gologin.api_token,
+            account=temp_new_account,
+            cookies_to_load_path=account.cookies_path  # <--- Ключевой момент!
+        )
 
-            # 3. Запускаем сессию в НОВОМ профиле и переносим куки из СТАРОГО
-            await _run_browser_session(
-                token=working_gologin.api_token,
-                account=temp_new_account,
-                cookies_to_load_path=account.cookies_path  # <--- Ключевой момент!
-            )
+        # 4. Если все прошло успешно, обновляем базу данных
+        logger.info("Перенос сессии прошел успешно. Обновляем базу данных.")
+        account = await account.delete()
+        # Создаем финальную новую запись
+        final_new_account = await AccountGPT(
+            id=new_profile_id,
+            name=account.name,
+            email_address=account.email_address,
+            password=account.password,
+            accountGoLogin_id=working_gologin.id
+        ).create()
 
-            # 4. Если все прошло успешно, обновляем базу данных
-            logger.info("Перенос сессии прошел успешно. Обновляем базу данных.")
-            account = await account.delete()
-            # Создаем финальную новую запись
-            final_new_account = await AccountGPT(
-                id=new_profile_id,
-                name=account.name,
-                email_address=account.email_address,
-                password=account.password,
-                accountGoLogin_id=working_gologin.id
-            ).create()
+        # Удаляем старый файл cookie, если он есть
+        if os.path.exists(account.cookies_path):
+            os.remove(account.cookies_path)
 
-            # Удаляем старый файл cookie, если он есть
-            if os.path.exists(account.cookies_path):
-                os.remove(account.cookies_path)
+        await api_client.close()
+        return final_new_account  # Возвращаем новый, "вылеченный" аккаунт
 
+    except GoLoginAPIError as e:
+        if e.status_code == 403:  # Если и этот токен исчерпан
+            logger.warning(f"Токен {working_gologin.id} тоже исчерпан. Ищем следующий.")
+            await AccountGoLogin.update(working_gologin.id, valid=False)
             await api_client.close()
-            return final_new_account  # Возвращаем новый, "вылеченный" аккаунт
 
-        except GoLoginAPIError as e:
-            if e.status_code == 403:  # Если и этот токен исчерпан
-                logger.warning(f"Токен {working_gologin.id} тоже исчерпан. Ищем следующий.")
-                await working_gologin.mark_as_invalid()
-                await api_client.close()
-                continue  # Идем на следующую итерацию цикла while
-            else:
-                await api_client.close()
-                raise
-        except Exception:
+        else:
             await api_client.close()
             raise
+    except Exception:
+        await api_client.close()
+        raise
 
 
 async def _run_browser_session(token: str, account: AccountGPT, cookies_to_load_path: str = None, code: str = None):

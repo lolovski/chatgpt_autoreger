@@ -58,9 +58,8 @@ class GoLoginProfile:
                 self.profile_id = profile_data.get("id")
                 if not self.profile_id:
                     raise GoLoginAPIError(0, f"Не удалось получить ID из созданного профиля: {profile_data}")
-                # Примечание: установка прокси для quick-профилей обычно не требуется,
-                # так как они создаются с уже настроенным гео.
-                await self.api_client.set_proxy(profile_id=self.profile_id)
+
+            await self.api_client.set_proxy(profile_id=self.profile_id)
 
             logger.info(f"Запуск профиля: {self.profile_id}")
             # Метод start_profile из GoLoginAPIClient уже содержит логику ожидания и повторов

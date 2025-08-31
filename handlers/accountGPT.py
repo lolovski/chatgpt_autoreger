@@ -151,7 +151,7 @@ async def manual_create_gpt_account_data_handler(message: Message, state: FSMCon
     except TwoFactorRequiredError:
         # Логика 2FA остается на случай, если она понадобится
         await state.update_data(
-            action_type='manual_login', go_login_id=used_gologin.id,
+            action_type='manual_login',
             email_address=email, password=password, name=name
         )
         await state.set_state(AccountGPTForm.wait_for_2fa_code)
@@ -191,11 +191,21 @@ async def launch_account_gpt_handler(callback: CallbackQuery, state: FSMContext,
             no_valid_gologin_accounts_error,
             reply_markup=gpt_account_keyboard(account=db_account)
         )
+    except TwoFactorRequiredError:
+        # Логика 2FA остается на случай, если она понадобится
+        await state.update_data(
+            action_type='restart',
+            account_id=db_account.id,
+        )
+        await state.set_state(AccountGPTForm.wait_for_2fa_code)
+        await callback.message.answer("⚠️ Требуется код 2FA. Отправьте его следующим сообщением.")
     except Exception as e:
         await callback.message.edit_text(
             error_launch_account_gpt_text + f"\n\n<b>Ошибка:</b> <code>{e}</code>",
             reply_markup=gpt_account_keyboard(account=db_account)
         )
+
+
 # --- Переименование ---
 @accountGPT_router.callback_query(AccountGPTCallback.filter(F.action == 'rename'))
 async def rename_gpt_account_handler(callback: CallbackQuery, state: FSMContext, callback_data: AccountGPTCallback):
@@ -255,44 +265,67 @@ async def process_2fa_code_handler(message: Message, bot: Bot, state: FSMContext
 
     try:
         if action_type == 'manual_login':
-            go_login_id = data.get('go_login_id')
-            account_go_login = await AccountGoLogin.get(id=go_login_id)
+
             email_address = data.get('email_address')
             password = data.get('password')
             name = data.get('name')
+            try:
+                new_profile_id, used_gologin = await execute_with_gologin_rotation(
+                    operation=login_chatgpt_account,
+                    message_interface=message,
+                    email_address=email_address,  # Передаем доп. аргументы для login_chatgpt_account
+                    password=password,
+                    code=code
+                )
 
-            # Вызываем сервис еще раз, но уже с кодом
-            new_profile_id = await login_chatgpt_account(
-                token=account_go_login.api_token,
-                email_address=email_address,
-                password=password,
-                code=code
-            )
+                db_account = await AccountGPT(
+                    email_address=email_address, password=password, name=name,
+                    accountGoLogin_id=used_gologin.id, id=new_profile_id
+                ).create()
 
-            db_account = await AccountGPT(
-                email_address=email_address, password=password, name=name,
-                accountGoLogin_id=account_go_login.id, id=new_profile_id
-            ).create()
-
-            await state.clear()
-            await message.answer(text=create_gpt_account_success_text + gpt_account_text(db_account),
-                                 reply_markup=gpt_account_keyboard(account=db_account))
+                await message.answer(
+                    create_gpt_account_success_text + "\n\n" + gpt_account_text(db_account),
+                    reply_markup=gpt_account_keyboard(db_account)
+                )
+            except NoValidGoLoginAccountsError:
+                await message.answer(no_valid_gologin_accounts_error, reply_markup=main_menu_keyboard())
+            # except Exception as e:
+            #     await message.answer(
+            #         create_gpt_account_error_text + f"\n\nОшибка: {e}",
+            #         reply_markup=main_menu_keyboard()
+            #     )
 
         elif action_type == 'restart':
             db_account = await AccountGPT.get(id=data.get('account_id'))
-            gologin_account = await AccountGoLogin.get(id=data.get('gologin_id'))
+            try:
+                # Просто вызываем наш "умный" сервис
+                final_account, used_gologin = await execute_with_gologin_rotation(
+                    operation=restart_and_heal_chatgpt_account,  # Используем простой сервис
+                    message_interface=message,
+                    account=db_account,
+                    code=code# Передаем доп. аргумент
+                )
+                # Показываем пользователю финальный, актуальный результат
+                await message.answer(
+                    f"<b>✅ Профиль запущен и готов к работе!</b>\n\n{gpt_account_text(final_account)}",
+                    reply_markup=gpt_account_keyboard(account=final_account)
+                )
 
-            # Вызываем сервис еще раз, но уже с кодом
-            await restart_chatgpt_account(
-                token=gologin_account.api_token,
-                account=db_account,
-                code=code
-            )
+            except NoValidGoLoginAccountsError:
+                await message.answer(
+                    no_valid_gologin_accounts_error,
+                    reply_markup=gpt_account_keyboard(account=db_account)
+                )
+            except Exception as e:
+                await message.answer(
+                    error_launch_account_gpt_text + f"\n\n<b>Ошибка:</b> <code>{e}</code>",
+                    reply_markup=gpt_account_keyboard(account=db_account)
+                )
 
             await state.clear()
             updated_account = await AccountGPT.get(id=db_account.id)
-            await message.answer(launch_account_gpt_text + gpt_account_text(account=db_account),
-                                 reply_markup=gpt_account_keyboard(account=db_account))
+            await message.answer(launch_account_gpt_text + gpt_account_text(account=updated_account),
+                                 reply_markup=gpt_account_keyboard(account=updated_account))
         else:
             raise RuntimeError("Неизвестный тип действия в состоянии 2FA")
 

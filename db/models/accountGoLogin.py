@@ -1,14 +1,12 @@
 from datetime import datetime
-from typing import Any
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from datetime import datetime
+from sqlalchemy import Column, String, select, Integer, DateTime, Boolean, update, delete, func # <--- Добавляем func, delete, update
+from sqlalchemy.orm import relationship
 from pytz import timezone
-from db import Base, session
-from sqlalchemy import Column, String, ForeignKey, select, Integer, DateTime, Boolean
-from sqlalchemy.orm import relationship, Mapped, mapped_column, Session
-moscow_tz = timezone('Europe/Moscow')
 
+from db import Base, session
+
+moscow_tz = timezone('Europe/Moscow')
 
 class AccountGoLogin(Base):
     __tablename__ = 'accountGoLogin'
@@ -17,8 +15,7 @@ class AccountGoLogin(Base):
     api_token = Column(String)
     registration_date = Column(DateTime, default=datetime.now(moscow_tz))
     valid = Column(Boolean, default=True)
-    accountsGPT = relationship("AccountGPT", back_populates="accountGoLogin", )
-    auto_create = Column(Boolean, default=True)
+    accountsGPT = relationship("AccountGPT", back_populates="accountGoLogin")
 
     def __init__(self, email_address: str, api_token: str):
         self.email_address = email_address
@@ -31,10 +28,29 @@ class AccountGoLogin(Base):
         await db_session.close()
         return self
 
-    @classmethod
-    async def get_multi(cls, limit: int = 10, offset: int = 0):
+    async def delete(self):
         db_session = await session()
-        result = await db_session.execute(select(cls).limit(limit).offset(offset).order_by(cls.registration_date.asc()))
+        await db_session.execute(delete(AccountGoLogin).where(AccountGoLogin.id == self.id))
+        await db_session.commit()
+        await db_session.close()
+
+    async def mark_as_invalid(self):
+        db_session = await session()
+        await db_session.execute(update(AccountGoLogin).where(AccountGoLogin.id == self.id).values(valid=False))
+        await db_session.commit()
+        await db_session.close()
+
+    @classmethod
+    async def get_count(cls):
+        db_session = await session()
+        result = await db_session.execute(select(func.count(cls.id)))
+        await db_session.close()
+        return result.scalar_one()
+
+    @classmethod
+    async def get_multi(cls, limit: int = 5, offset: int = 0):
+        db_session = await session()
+        result = await db_session.execute(select(cls).order_by(cls.registration_date.desc()).limit(limit).offset(offset))
         await db_session.close()
         return result.scalars().all()
 

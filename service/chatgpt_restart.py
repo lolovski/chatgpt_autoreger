@@ -11,6 +11,7 @@ from service.exceptions import TwoFactorRequiredError, NoValidGoLoginAccountsErr
 
 logger = logging.getLogger(__name__)
 
+
 async def _perform_login(page, account: AccountGPT, code: str = None):
     """Вспомогательная функция для выполнения логина на странице."""
     logger.info(f"Сессия невалидна для {account.email_address}. Выполняется повторный вход.")
@@ -55,7 +56,7 @@ async def _perform_login(page, account: AccountGPT, code: str = None):
     await page.waitForSelector('#prompt-textarea', {'timeout': 30000})
 
 
-async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str) -> AccountGPT:
+async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str, code: str = None) -> AccountGPT:
     """
     "Лечит" и перезапускает аккаунт ChatGPT.
     1. Пытается запустить существующий профиль с привязанным токеном.
@@ -70,7 +71,7 @@ async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str) -> A
         logger.info(f"Пробуем запустить профиль {account.id} с привязанным токеном {linked_gologin.id}")
         try:
             # Пытаемся запустить текущий профиль
-            await _run_browser_session(token=linked_gologin.api_token, account=account)
+            await _run_browser_session(token=linked_gologin.api_token, account=account, code=code)
             logger.info("Успешный запуск с существующими данными.")
             return account  # Если все хорошо, возвращаем исходный аккаунт
         except GoLoginAPIError as e:
@@ -108,7 +109,8 @@ async def restart_and_heal_chatgpt_account(account: AccountGPT, token: str) -> A
         await _run_browser_session(
             token=working_gologin.api_token,
             account=temp_new_account,
-            cookies_to_load_path=account.cookies_path  # <--- Ключевой момент!
+            cookies_to_load_path=account.cookies_path, # <--- Ключевой момент!
+            code=code
         )
 
         # 4. Если все прошло успешно, обновляем базу данных

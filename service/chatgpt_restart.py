@@ -152,7 +152,6 @@ async def _run_browser_session(token: str, account: AccountGPT, cookies_to_load_
     """Вспомогательная функция, которая запускает браузер и управляет сессией."""
     profile = GoLoginProfile(api_token=token, profile_id=account.id)
     async with profile as page:
-        await page.goto('https://chatgpt.com')
         # Если указан путь для загрузки - грузим куки (сценарий "лечения")
         # Иначе - грузим куки самого аккаунта (сценарий "счастливого пути")
         path_to_load = cookies_to_load_path or account.cookies_path
@@ -162,6 +161,9 @@ async def _run_browser_session(token: str, account: AccountGPT, cookies_to_load_
             await profile.load_cookies(path_to_load)
         except FileNotFoundError:
             logger.warning(f"Файл cookie {path_to_load} не найден. Пробуем войти без него.")
+
+        await page.goto('https://chatgpt.com')
+        
         is_login_needed = "auth" in page.url or await page.querySelector('button[data-testid="login-button"]')
         if is_login_needed:
             # ИЗМЕНЕНО: Вызываем новый процессор вместо _perform_login

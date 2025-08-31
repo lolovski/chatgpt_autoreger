@@ -88,8 +88,15 @@ class GoLoginProfile:
         logger.info(f"Отсоединение от профиля: {self.profile_id}, оставляя его открытым.")
 
         if self.browser:
-            await self.browser.disconnect()
-            logger.info("Соединение pyppeteer разорвано. Браузер остается открытым.")
+            if exc_type is not None:
+                logger.warning(f"Произошла ошибка ({exc_type.__name__}). Полностью закрываю браузер.")
+                await self.browser.close()
+                logger.info("Браузер полностью закрыт.")
+            else:
+
+                logger.info(f"Операция успешна. Отсоединяюсь от профиля {self.profile_id}, оставляя его открытым.")
+                await self.browser.disconnect()
+                logger.info("Соединение pyppeteer разорвано. Браузер остается открытым.")
 
         # ИЗМЕНЕНО: ПОЛНОСТЬЮ УДАЛЕНА ЛОГИКА УДАЛЕНИЯ ПРОФИЛЯ.
         # Даже временные профили теперь не удаляются, так как по условию задачи
